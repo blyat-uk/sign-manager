@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QPointF, QThread, pyqtSignal, QObject
+from PyQt6.QtCore import Qt, QPointF, QRectF, QThread, pyqtSignal, QObject
 from PyQt6.QtGui import QColor, QCursor, QKeySequence, QDragEnterEvent, QDropEvent, QShortcut, QCloseEvent, QImage
 from PyQt6.QtWidgets import (
     QMainWindow,
@@ -28,6 +28,15 @@ from gallery_widget import GalleryPanel, LabelGroup, compute_label_groups, _crop
 from label_toolbar import LabelToolbar
 
 _VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".webm"}
+
+
+def _anchor_for_alignment(rect: QRectF, alignment: int) -> QPointF:
+    """Return the anchor point of *rect* for the given ASS numpad alignment."""
+    h_align = ((alignment - 1) % 3) + 1
+    v_group = (alignment - 1) // 3
+    ax = rect.x() if h_align == 1 else (rect.right() if h_align == 3 else rect.center().x())
+    ay = rect.bottom() if v_group == 0 else (rect.center().y() if v_group == 1 else rect.top())
+    return QPointF(ax, ay)
 
 
 def _status_msg(window: QMainWindow, msg: str, timeout: int = 3000) -> None:
@@ -133,7 +142,7 @@ class MainWindow(QMainWindow):
         self._groups: list[LabelGroup] = []
         self._group_index: int = -1
         self._video_path: str | None = None
-        self._style_clipboard: int | None = None
+        self._style_clipboard: tuple[int, int | None] | None = None
         self.__dirty: bool = False
         self._folder_files: list[str] = []
         self._folder_index: int = -1
@@ -243,6 +252,7 @@ class MainWindow(QMainWindow):
         self._toolbar.duplicate_clicked.connect(self._on_duplicate)
         self._toolbar.delete_clicked.connect(self._on_delete)
         self._toolbar.font_size_changed.connect(self._on_font_size_changed)
+        self._toolbar.alignment_changed.connect(self._on_alignment_changed)
         self._toolbar.copy_style_clicked.connect(self._on_copy_style)
         self._toolbar.paste_style_clicked.connect(self._on_paste_style)
 
@@ -341,13 +351,19 @@ class MainWindow(QMainWindow):
         if not folder:
             return
         self._cancel_folder_preload()
+        def _has_ass_file(video: Path) -> bool:
+            if video.with_suffix(".ass").is_file():
+                return True
+            return bool(sorted(video.parent.glob(f"{glob.escape(video.stem)}.*.ass")))
+
         files = [
             str(p) for p in Path(folder).iterdir()
             if p.is_file() and p.suffix.lower() in _VIDEO_EXTS
+            and _has_ass_file(p)
         ]
         files.sort(key=_natural_sort_key)
         if not files:
-            QMessageBox.information(self, "No Videos", "No video files found in the selected folder.")
+            QMessageBox.information(self, "No Videos", "No video files with matching .ass subtitle files found in the selected folder.")
             return
         self._folder_files = files
         # Populate sidebar
@@ -624,8 +640,13 @@ class MainWindow(QMainWindow):
         font_size = label.font_size if label.font_size is not None else (
             self._ass.label_font_size if self._ass else 36
         )
+        if multi:
+            alignments = {lb.alignment for lb in selected}
+            effective_alignment = alignments.pop() if len(alignments) == 1 else None
+        else:
+            effective_alignment = label.alignment
         self._toolbar.set_multi_mode(multi)
-        self._toolbar.show_for_label(font_size)
+        self._toolbar.show_for_label(font_size, effective_alignment)
         self._update_toolbar_position()
 
     def _on_selection_cleared(self) -> None:
@@ -722,6 +743,22 @@ class MainWindow(QMainWindow):
             self._ass.set_label_font_size(label, size)
         self._dirty = True
         self._player.update()
+
+    def _on_alignment_changed(self, new_alignment: int) -> None:
+        if not self._ass:
+            return
+        selected = self._player.selected_labels()
+        if not selected:
+            return
+        for label in selected:
+            font = self._player._font_for_label(label)
+            rect = self._player._compute_rect(label, font)
+            new_anchor = _anchor_for_alignment(rect, new_alignment)
+            new_x, new_y = self._player._widget_to_ass(new_anchor.x(), new_anchor.y())
+            self._ass.set_label_alignment(label, new_alignment)
+            self._ass.set_label_position(label, new_x, new_y)
+        self._dirty = True
+        self._player.update()
         self._update_toolbar_position()
 
     def _on_copy_style(self) -> None:
@@ -729,21 +766,30 @@ class MainWindow(QMainWindow):
         if not selected:
             return
         label = selected[0]
-        self._style_clipboard = label.font_size if label.font_size is not None else (
+        font_size = label.font_size if label.font_size is not None else (
             self._ass.label_font_size if self._ass else 36
         )
-        _status_msg(self, f"Copied style (font size: {self._style_clipboard})")
+        self._style_clipboard = (font_size, label.alignment)
+        _status_msg(self, f"Copied style (font size: {font_size}, alignment: {label.alignment})")
 
     def _on_paste_style(self) -> None:
         if not self._ass or self._style_clipboard is None:
             return
+        font_size, alignment = self._style_clipboard
         for label in self._player.selected_labels():
-            self._ass.set_label_font_size(label, self._style_clipboard)
+            self._ass.set_label_font_size(label, font_size)
+            if alignment is not None:
+                font = self._player._font_for_label(label)
+                rect = self._player._compute_rect(label, font)
+                new_anchor = _anchor_for_alignment(rect, alignment)
+                new_x, new_y = self._player._widget_to_ass(new_anchor.x(), new_anchor.y())
+                self._ass.set_label_alignment(label, alignment)
+                self._ass.set_label_position(label, new_x, new_y)
         self._dirty = True
         self._player.update()
-        self._toolbar.show_for_label(self._style_clipboard)
+        self._toolbar.show_for_label(font_size, alignment)
         self._update_toolbar_position()
-        _status_msg(self, f"Pasted style (font size: {self._style_clipboard})")
+        _status_msg(self, f"Pasted style (font size: {font_size}, alignment: {alignment})")
 
     # ── Inline text editing ──
 

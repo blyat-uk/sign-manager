@@ -20,6 +20,25 @@ _BTN_STYLE = """
     QPushButton:pressed { background: #606060; }
 """
 
+_ALIGN_BTN_STYLE = """
+    QPushButton {
+        background: #3a3a3a;
+        color: #ddd;
+        border: 1px solid #555;
+        border-radius: 3px;
+        padding: 2px 6px;
+        font-size: 12px;
+        min-width: 20px;
+    }
+    QPushButton:hover { background: #505050; }
+    QPushButton:pressed { background: #606060; }
+    QPushButton:checked {
+        background: #1f5fa6;
+        border-color: #4a9eff;
+        color: #fff;
+    }
+"""
+
 _SIZE_LABEL_STYLE = """
     QLabel {
         color: #eee;
@@ -37,6 +56,7 @@ class LabelToolbar(QWidget):
     duplicate_clicked = pyqtSignal()
     delete_clicked = pyqtSignal()
     font_size_changed = pyqtSignal(int)
+    alignment_changed = pyqtSignal(int)
     copy_style_clicked = pyqtSignal()
     paste_style_clicked = pyqtSignal()
 
@@ -74,6 +94,21 @@ class LabelToolbar(QWidget):
         self._sep2 = self._make_sep()
         layout.addWidget(self._sep2)
 
+        self._align_btns: dict[int, QPushButton] = {}
+        for label_text, an_val in (("L", 4), ("C", 5), ("R", 6)):
+            btn = QPushButton(label_text)
+            btn.setStyleSheet(_ALIGN_BTN_STYLE)
+            btn.setCheckable(True)
+            btn.setAutoExclusive(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.clicked.connect(lambda _checked, a=an_val: self.alignment_changed.emit(a))
+            layout.addWidget(btn)
+            self._align_btns[an_val] = btn
+
+        self._sep3 = self._make_sep()
+        layout.addWidget(self._sep3)
+
         self._copy_btn = self._make_btn("Copy", self.copy_style_clicked.emit)
         self._paste_btn = self._make_btn("Paste", self.paste_style_clicked.emit)
         layout.addWidget(self._copy_btn)
@@ -106,9 +141,17 @@ class LabelToolbar(QWidget):
             self._size_label.setText(str(self._font_size))
             self.font_size_changed.emit(self._font_size)
 
-    def show_for_label(self, font_size: int):
+    def set_alignment(self, alignment: int | None):
+        effective = alignment if alignment in (4, 5, 6) else None
+        for an, btn in self._align_btns.items():
+            btn.blockSignals(True)
+            btn.setChecked(an == effective)
+            btn.blockSignals(False)
+
+    def show_for_label(self, font_size: int, alignment: int | None = None):
         self._font_size = font_size
         self._size_label.setText(str(font_size))
+        self.set_alignment(alignment)
         self.adjustSize()
         self.show()
 
