@@ -114,6 +114,7 @@ class FolderPreloadWorker(QObject):
                             ass_file.play_res_x, ass_file.play_res_y,
                             ass_file.label_font_name, ass_file.label_font_size,
                             ass_file.label_alignment,
+                            styles=dict(ass_file.styles),
                         )
                         thumbnails[i] = cropped
 
@@ -142,7 +143,7 @@ class MainWindow(QMainWindow):
         self._groups: list[LabelGroup] = []
         self._group_index: int = -1
         self._video_path: str | None = None
-        self._style_clipboard: tuple[int, int | None] | None = None
+        self._style_clipboard: tuple[int, int | None, bool | None, bool | None, str] | None = None
         self.__dirty: bool = False
         self._folder_files: list[str] = []
         self._folder_index: int = -1
@@ -232,6 +233,9 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Shift+Left"), self, self._prev_file)
         # Delete selected labels
         QShortcut(QKeySequence(Qt.Key.Key_Delete), self, self._on_delete)
+        # Bold/Italic shortcuts
+        self._bold_shortcut = QShortcut(QKeySequence("Ctrl+B"), self, self._on_bold_shortcut)
+        self._italic_shortcut = QShortcut(QKeySequence("Ctrl+I"), self, self._on_italic_shortcut)
 
         # ── Connect signals ──
 
@@ -241,6 +245,7 @@ class MainWindow(QMainWindow):
         self._player.selection_cleared.connect(self._on_selection_cleared)
         self._player.edit_requested.connect(self._on_edit_requested)
         self._player.text_edited.connect(self._on_text_edited)
+        self._player.editing_cancelled.connect(self._on_editing_cancelled)
         self._player.context_menu_requested.connect(self._on_context_menu)
         self._player.empty_context_menu_requested.connect(self._on_empty_context_menu)
 
@@ -255,6 +260,9 @@ class MainWindow(QMainWindow):
         self._toolbar.alignment_changed.connect(self._on_alignment_changed)
         self._toolbar.copy_style_clicked.connect(self._on_copy_style)
         self._toolbar.paste_style_clicked.connect(self._on_paste_style)
+        self._toolbar.bold_toggled.connect(self._on_bold_toggled)
+        self._toolbar.italic_toggled.connect(self._on_italic_toggled)
+        self._toolbar.style_changed.connect(self._on_style_changed)
 
     # ── Dirty flag property ──
 
@@ -645,12 +653,33 @@ class MainWindow(QMainWindow):
             effective_alignment = alignments.pop() if len(alignments) == 1 else None
         else:
             effective_alignment = label.alignment
+
+        # Determine bold/italic state
+        if self._ass:
+            style = self._ass.styles.get(label.style_name)
+            default_bold = style.bold if style else self._ass.label_bold
+            default_italic = style.italic if style else self._ass.label_italic
+        else:
+            default_bold = False
+            default_italic = False
+        bold = label.bold if label.bold is not None else default_bold
+        italic = label.italic if label.italic is not None else default_italic
+
+        available_styles = list(self._ass.styles.keys()) if self._ass else []
+
         self._toolbar.set_multi_mode(multi)
-        self._toolbar.show_for_label(font_size, effective_alignment)
+        self._toolbar.show_for_label(
+            font_size, effective_alignment,
+            bold=bold, italic=italic,
+            style_name=label.style_name,
+            available_styles=available_styles,
+        )
         self._update_toolbar_position()
 
     def _on_selection_cleared(self) -> None:
         self._toolbar.hide()
+        self._bold_shortcut.setEnabled(True)
+        self._italic_shortcut.setEnabled(True)
 
     def _update_toolbar_position(self) -> None:
         """Position toolbar above the first selected label's rect."""
@@ -769,15 +798,21 @@ class MainWindow(QMainWindow):
         font_size = label.font_size if label.font_size is not None else (
             self._ass.label_font_size if self._ass else 36
         )
-        self._style_clipboard = (font_size, label.alignment)
-        _status_msg(self, f"Copied style (font size: {font_size}, alignment: {label.alignment})")
+        self._style_clipboard = (font_size, label.alignment, label.bold, label.italic, label.style_name)
+        _status_msg(self, f"Copied style (font size: {font_size}, alignment: {label.alignment}, style: {label.style_name})")
 
     def _on_paste_style(self) -> None:
         if not self._ass or self._style_clipboard is None:
             return
-        font_size, alignment = self._style_clipboard
+        font_size, alignment, bold, italic, style_name = self._style_clipboard
         for label in self._player.selected_labels():
             self._ass.set_label_font_size(label, font_size)
+            if bold is not None:
+                self._ass.set_label_bold(label, bold)
+            if italic is not None:
+                self._ass.set_label_italic(label, italic)
+            if style_name and style_name in self._ass.styles:
+                self._ass.set_label_style(label, style_name)
             if alignment is not None:
                 font = self._player._font_for_label(label)
                 rect = self._player._compute_rect(label, font)
@@ -786,21 +821,116 @@ class MainWindow(QMainWindow):
                 self._ass.set_label_alignment(label, alignment)
                 self._ass.set_label_position(label, new_x, new_y)
         self._dirty = True
+        self._player._font_corrections.clear()
         self._player.update()
-        self._toolbar.show_for_label(font_size, alignment)
+        # Determine effective bold/italic for toolbar display
+        eff_bold = bold if bold is not None else False
+        eff_italic = italic if italic is not None else False
+        available_styles = list(self._ass.styles.keys())
+        self._toolbar.show_for_label(
+            font_size, alignment,
+            bold=eff_bold, italic=eff_italic,
+            style_name=style_name or "Label",
+            available_styles=available_styles,
+        )
         self._update_toolbar_position()
-        _status_msg(self, f"Pasted style (font size: {font_size}, alignment: {alignment})")
+        _status_msg(self, f"Pasted style (font size: {font_size}, alignment: {alignment}, style: {style_name})")
+
+    def _on_bold_toggled(self, bold: bool) -> None:
+        if not self._ass:
+            return
+        for label in self._player.selected_labels():
+            self._ass.set_label_bold(label, bold)
+        self._dirty = True
+        self._player.update()
+        self._update_toolbar_position()
+
+    def _on_italic_toggled(self, italic: bool) -> None:
+        if not self._ass:
+            return
+        for label in self._player.selected_labels():
+            self._ass.set_label_italic(label, italic)
+        self._dirty = True
+        self._player.update()
+        self._update_toolbar_position()
+
+    def _on_style_changed(self, style_name: str) -> None:
+        if not self._ass or style_name not in self._ass.styles:
+            return
+        for label in self._player.selected_labels():
+            self._ass.set_label_style(label, style_name)
+        self._dirty = True
+        self._player._font_corrections.clear()
+        self._player.update()
+        self._update_toolbar_position()
+
+    def _on_bold_shortcut(self) -> None:
+        # If inline editor is active, let QTextEdit handle Ctrl+B
+        if self._player._text_edit is not None:
+            return
+        selected = self._player.selected_labels()
+        if not selected or not self._ass:
+            return
+        # Toggle: if any selected label is bold, make all non-bold; otherwise make all bold
+        def _is_bold(lb: LabelDialogue) -> bool:
+            if lb.bold is not None:
+                return lb.bold
+            st = self._ass.styles.get(lb.style_name) if self._ass else None
+            return st.bold if st else False
+
+        any_bold = any(_is_bold(lb) for lb in selected)
+        new_bold = not any_bold
+        for lb in selected:
+            self._ass.set_label_bold(lb, new_bold)
+        self._dirty = True
+        self._toolbar._bold_btn.blockSignals(True)
+        self._toolbar._bold_btn.setChecked(new_bold)
+        self._toolbar._bold_btn.blockSignals(False)
+        self._player.update()
+        self._update_toolbar_position()
+
+    def _on_italic_shortcut(self) -> None:
+        if self._player._text_edit is not None:
+            return
+        selected = self._player.selected_labels()
+        if not selected or not self._ass:
+            return
+
+        def _is_italic(lb: LabelDialogue) -> bool:
+            if lb.italic is not None:
+                return lb.italic
+            st = self._ass.styles.get(lb.style_name) if self._ass else None
+            return st.italic if st else False
+
+        any_italic = any(_is_italic(lb) for lb in selected)
+        new_italic = not any_italic
+        for lb in selected:
+            self._ass.set_label_italic(lb, new_italic)
+        self._dirty = True
+        self._toolbar._italic_btn.blockSignals(True)
+        self._toolbar._italic_btn.setChecked(new_italic)
+        self._toolbar._italic_btn.blockSignals(False)
+        self._player.update()
+        self._update_toolbar_position()
 
     # ── Inline text editing ──
 
     def _on_edit_requested(self, label: LabelDialogue) -> None:
         self._toolbar.hide()
+        self._bold_shortcut.setEnabled(False)
+        self._italic_shortcut.setEnabled(False)
         self._player.start_editing(label)
 
-    def _on_text_edited(self, label: LabelDialogue, new_text: str) -> None:
+    def _on_editing_cancelled(self) -> None:
+        self._bold_shortcut.setEnabled(True)
+        self._italic_shortcut.setEnabled(True)
+
+    def _on_text_edited(self, label: LabelDialogue, rich_text: str) -> None:
+        self._bold_shortcut.setEnabled(True)
+        self._italic_shortcut.setEnabled(True)
         if not self._ass:
             return
-        self._ass.set_label_text(label, new_text)
+        self._ass.set_label_rich_text(label, rich_text)
         self._dirty = True
         self._player.show_time(self._player._current_time)
         # Update just the text on the affected thumbnail
@@ -808,7 +938,7 @@ class MainWindow(QMainWindow):
         if gi >= 0 and gi < len(self._gallery._thumbnails):
             texts = [lb.text for lb in self._groups[gi].labels]
             self._gallery._thumbnails[gi].update_texts(texts)
-        _status_msg(self, f"Updated text to \"{new_text}\"")
+        _status_msg(self, f"Updated text to \"{label.text}\"")
 
     # ── Context menus ──
 

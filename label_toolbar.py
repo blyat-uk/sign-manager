@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import QWidget, QHBoxLayout, QPushButton, QLabel
+from PyQt6.QtWidgets import QWidget, QHBoxLayout, QPushButton, QLabel, QComboBox
 
 _MIN_FONT_SIZE = 8
 _FONT_STEP = 2
@@ -49,6 +49,27 @@ _SIZE_LABEL_STYLE = """
     }
 """
 
+_COMBO_STYLE = """
+    QComboBox {
+        background: #3a3a3a;
+        color: #ddd;
+        border: 1px solid #555;
+        border-radius: 3px;
+        padding: 2px 4px;
+        font-size: 11px;
+        min-width: 60px;
+        max-width: 120px;
+    }
+    QComboBox:hover { background: #505050; }
+    QComboBox::drop-down { border: none; width: 16px; }
+    QComboBox QAbstractItemView {
+        background: #3a3a3a;
+        color: #ddd;
+        selection-background-color: #1f5fa6;
+        border: 1px solid #555;
+    }
+"""
+
 
 class LabelToolbar(QWidget):
     """Floating toolbar shown above a selected label."""
@@ -59,6 +80,9 @@ class LabelToolbar(QWidget):
     alignment_changed = pyqtSignal(int)
     copy_style_clicked = pyqtSignal()
     paste_style_clicked = pyqtSignal()
+    bold_toggled = pyqtSignal(bool)
+    italic_toggled = pyqtSignal(bool)
+    style_changed = pyqtSignal(str)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -78,6 +102,15 @@ class LabelToolbar(QWidget):
         self._del_btn = self._make_btn("Del", self.delete_clicked.emit)
         layout.addWidget(self._dup_btn)
         layout.addWidget(self._del_btn)
+
+        # Style dropdown
+        self._sep_style = self._make_sep()
+        layout.addWidget(self._sep_style)
+        self._style_combo = QComboBox()
+        self._style_combo.setStyleSheet(_COMBO_STYLE)
+        self._style_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._style_combo.currentTextChanged.connect(self._on_style_combo_changed)
+        layout.addWidget(self._style_combo)
 
         self._sep1 = self._make_sep()
         layout.addWidget(self._sep1)
@@ -108,6 +141,32 @@ class LabelToolbar(QWidget):
 
         self._sep3 = self._make_sep()
         layout.addWidget(self._sep3)
+
+        # Bold / Italic toggle buttons
+        self._bold_btn = QPushButton("B")
+        self._bold_btn.setStyleSheet(_ALIGN_BTN_STYLE)
+        self._bold_btn.setCheckable(True)
+        self._bold_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._bold_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        font = self._bold_btn.font()
+        font.setBold(True)
+        self._bold_btn.setFont(font)
+        self._bold_btn.clicked.connect(lambda checked: self.bold_toggled.emit(checked))
+        layout.addWidget(self._bold_btn)
+
+        self._italic_btn = QPushButton("I")
+        self._italic_btn.setStyleSheet(_ALIGN_BTN_STYLE)
+        self._italic_btn.setCheckable(True)
+        self._italic_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._italic_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        font = self._italic_btn.font()
+        font.setItalic(True)
+        self._italic_btn.setFont(font)
+        self._italic_btn.clicked.connect(lambda checked: self.italic_toggled.emit(checked))
+        layout.addWidget(self._italic_btn)
+
+        self._sep4 = self._make_sep()
+        layout.addWidget(self._sep4)
 
         self._copy_btn = self._make_btn("Copy", self.copy_style_clicked.emit)
         self._paste_btn = self._make_btn("Paste", self.paste_style_clicked.emit)
@@ -141,6 +200,10 @@ class LabelToolbar(QWidget):
             self._size_label.setText(str(self._font_size))
             self.font_size_changed.emit(self._font_size)
 
+    def _on_style_combo_changed(self, text: str):
+        if text:
+            self.style_changed.emit(text)
+
     def set_alignment(self, alignment: int | None):
         effective = alignment if alignment in (4, 5, 6) else None
         for an, btn in self._align_btns.items():
@@ -148,10 +211,43 @@ class LabelToolbar(QWidget):
             btn.setChecked(an == effective)
             btn.blockSignals(False)
 
-    def show_for_label(self, font_size: int, alignment: int | None = None):
+    def show_for_label(
+        self,
+        font_size: int,
+        alignment: int | None = None,
+        bold: bool = False,
+        italic: bool = False,
+        style_name: str = "Label",
+        available_styles: list[str] | None = None,
+    ):
         self._font_size = font_size
         self._size_label.setText(str(font_size))
         self.set_alignment(alignment)
+
+        # Bold/Italic state
+        self._bold_btn.blockSignals(True)
+        self._bold_btn.setChecked(bold)
+        self._bold_btn.blockSignals(False)
+
+        self._italic_btn.blockSignals(True)
+        self._italic_btn.setChecked(italic)
+        self._italic_btn.blockSignals(False)
+
+        # Style dropdown
+        if available_styles and len(available_styles) > 1:
+            self._style_combo.blockSignals(True)
+            self._style_combo.clear()
+            self._style_combo.addItems(available_styles)
+            idx = self._style_combo.findText(style_name)
+            if idx >= 0:
+                self._style_combo.setCurrentIndex(idx)
+            self._style_combo.blockSignals(False)
+            self._style_combo.show()
+            self._sep_style.show()
+        else:
+            self._style_combo.hide()
+            self._sep_style.hide()
+
         self.adjustSize()
         self.show()
 
