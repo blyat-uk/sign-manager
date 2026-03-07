@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
 )
 
-from ass_parser import AssFile, LabelDialogue
+from ass_parser import AssFile, AssStyle, LabelDialogue, parse_rich_text
 from video_widget import extract_frame, extract_frame_as_image
 
 
@@ -90,6 +90,18 @@ def _format_time(seconds: float) -> str:
     return f"{m:02d}:{s:06.3f}"
 
 
+def _get_font_correction_for(font_name: str, bold: bool, italic: bool,
+                              font_corrections: dict[tuple[str, bool, bool], float]) -> float:
+    key = (font_name, bold, italic)
+    if key not in font_corrections:
+        probe = QFont(font_name)
+        probe.setPixelSize(96)
+        probe.setBold(bold)
+        probe.setItalic(italic)
+        font_corrections[key] = _libass_font_correction(probe)
+    return font_corrections[key]
+
+
 def _crop_to_labels_image(
     frame: QImage,
     group: LabelGroup,
@@ -101,6 +113,8 @@ def _crop_to_labels_image(
     label_bold: bool = False,
     label_italic: bool = False,
     font_correction: float = 1.0,
+    styles: dict[str, AssStyle] | None = None,
+    font_corrections: dict[tuple[str, bool, bool], float] | None = None,
 ) -> QImage:
     """Crop a QImage around the label bounding box (thread-safe)."""
     frame_w = frame.width()
@@ -108,27 +122,36 @@ def _crop_to_labels_image(
 
     scale_x = frame_w / play_res_x
     scale_y = frame_h / play_res_y
-    font_scale = frame_h / play_res_y * font_correction
-    pixel_size = max(int(label_font_size * font_scale), 8)
-    font = QFont(label_font_name)
-    font.setPixelSize(pixel_size)
-    font.setBold(label_bold)
-    font.setItalic(label_italic)
-    font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
-    fm = QFontMetricsF(font)
+
+    if font_corrections is None:
+        font_corrections = {}
 
     rects: list[QRectF] = []
     for lb in group.labels:
-        if lb.font_size is not None:
-            lb_pixel = max(int(lb.font_size * font_scale), 8)
-            lb_font = QFont(label_font_name)
-            lb_font.setPixelSize(lb_pixel)
-            lb_font.setBold(label_bold)
-            lb_font.setItalic(label_italic)
-            lb_font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
-            lb_fm = QFontMetricsF(lb_font)
+        # Determine style for this label
+        if styles and lb.style_name in styles:
+            st = styles[lb.style_name]
+            fn = st.font_name
+            fs = lb.font_size if lb.font_size is not None else st.font_size
+            bd = lb.bold if lb.bold is not None else st.bold
+            it = lb.italic if lb.italic is not None else st.italic
+            al = lb.alignment if lb.alignment is not None else st.alignment
         else:
-            lb_fm = fm
+            fn = label_font_name
+            fs = lb.font_size if lb.font_size is not None else label_font_size
+            bd = lb.bold if lb.bold is not None else label_bold
+            it = lb.italic if lb.italic is not None else label_italic
+            al = lb.alignment if lb.alignment is not None else label_alignment
+
+        corr = _get_font_correction_for(fn, bd, it, font_corrections)
+        font_scale = frame_h / play_res_y * corr
+        lb_pixel = max(int(fs * font_scale), 8)
+        lb_font = QFont(fn)
+        lb_font.setPixelSize(lb_pixel)
+        lb_font.setBold(bd)
+        lb_font.setItalic(it)
+        lb_font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
+        lb_fm = QFontMetricsF(lb_font)
 
         px = lb.pos_x * scale_x
         py = lb.pos_y * scale_y
@@ -140,9 +163,8 @@ def _crop_to_labels_image(
         total_w = text_w + 2 * pad_x
         total_h = text_h + 2 * pad_y
 
-        effective_alignment = lb.alignment if lb.alignment is not None else label_alignment
-        h_align = ((effective_alignment - 1) % 3) + 1
-        v_group = (effective_alignment - 1) // 3
+        h_align = ((al - 1) % 3) + 1
+        v_group = (al - 1) // 3
 
         if h_align == 1:
             x = px
@@ -209,6 +231,8 @@ class ThumbnailWorker(QObject):
         label_bold: bool = False,
         label_italic: bool = False,
         font_correction: float = 1.0,
+        styles: dict[str, AssStyle] | None = None,
+        font_corrections: dict[tuple[str, bool, bool], float] | None = None,
     ):
         super().__init__()
         self._video_path = video_path
@@ -221,6 +245,8 @@ class ThumbnailWorker(QObject):
         self._label_bold = label_bold
         self._label_italic = label_italic
         self._font_correction = font_correction
+        self._styles = styles
+        self._font_corrections = font_corrections if font_corrections is not None else {}
         self._cancelled = False
 
     def cancel(self):
@@ -239,6 +265,8 @@ class ThumbnailWorker(QObject):
                     self._label_alignment,
                     self._label_bold, self._label_italic,
                     self._font_correction,
+                    styles=self._styles,
+                    font_corrections=self._font_corrections,
                 )
                 self.thumbnail_ready.emit(i, cropped)
         self.finished.emit()
@@ -263,6 +291,8 @@ class SingleThumbnailWorker(QObject):
         label_bold: bool = False,
         label_italic: bool = False,
         font_correction: float = 1.0,
+        styles: dict[str, AssStyle] | None = None,
+        font_corrections: dict[tuple[str, bool, bool], float] | None = None,
     ):
         super().__init__()
         self._video_path = video_path
@@ -277,6 +307,8 @@ class SingleThumbnailWorker(QObject):
         self._label_bold = label_bold
         self._label_italic = label_italic
         self._font_correction = font_correction
+        self._styles = styles
+        self._font_corrections = font_corrections if font_corrections is not None else {}
         self._cancelled = False
 
     def cancel(self):
@@ -295,6 +327,8 @@ class SingleThumbnailWorker(QObject):
                 self._label_alignment,
                 self._label_bold, self._label_italic,
                 self._font_correction,
+                styles=self._styles,
+                font_corrections=self._font_corrections,
             )
             self.thumbnail_ready.emit(self._index, cropped)
         self.finished.emit()
@@ -440,6 +474,11 @@ class GalleryPanel(QWidget):
         probe.setBold(self._ass.label_bold)
         probe.setItalic(self._ass.label_italic)
         self._font_correction = _libass_font_correction(probe)
+        # Also populate per-font corrections for all styles
+        self._font_corrections: dict[tuple[str, bool, bool], float] = {}
+        if self._ass:
+            for st in self._ass.styles.values():
+                _get_font_correction_for(st.font_name, st.bold, st.italic, self._font_corrections)
 
     def set_data(self, video_path: str, ass: AssFile):
         self.clear()
@@ -502,6 +541,8 @@ class GalleryPanel(QWidget):
             self._ass.label_bold,
             self._ass.label_italic,
             self._font_correction,
+            styles=dict(self._ass.styles),
+            font_corrections=dict(getattr(self, '_font_corrections', {})),
         )
         self._thumb_thread = QThread()
         self._thumb_worker.moveToThread(self._thumb_thread)
@@ -546,6 +587,8 @@ class GalleryPanel(QWidget):
             self._ass.label_bold,
             self._ass.label_italic,
             self._font_correction,
+            styles=dict(self._ass.styles),
+            font_corrections=dict(getattr(self, '_font_corrections', {})),
         )
         self._single_thread = QThread()
         self._single_worker.moveToThread(self._single_thread)

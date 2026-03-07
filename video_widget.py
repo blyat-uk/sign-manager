@@ -12,7 +12,10 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QWidget, QTextEdit
 
-from ass_parser import AssFile, LabelDialogue, _seconds_to_time
+from ass_parser import (
+    AssFile, LabelDialogue, _seconds_to_time,
+    parse_rich_text, segments_to_html, html_to_segments, segments_to_ass,
+)
 
 
 def _libass_font_correction(font: QFont) -> float:
@@ -168,6 +171,7 @@ class VideoFrameWidget(QWidget):
     label_selected = pyqtSignal(LabelDialogue)
     edit_requested = pyqtSignal(LabelDialogue)
     text_edited = pyqtSignal(LabelDialogue, str)
+    editing_cancelled = pyqtSignal()
     context_menu_requested = pyqtSignal(QPointF)
     empty_context_menu_requested = pyqtSignal(QPointF)
     selection_cleared = pyqtSignal()
@@ -180,7 +184,7 @@ class VideoFrameWidget(QWidget):
 
         self._video_path: str | None = None
         self._ass: AssFile | None = None
-        self._font_correction: float | None = None
+        self._font_corrections: dict[tuple[str, bool, bool], float] = {}
         self._visible_labels: list[LabelDialogue] = []
         self._label_rects: dict[int, QRectF] = {}
 
@@ -230,7 +234,7 @@ class VideoFrameWidget(QWidget):
 
     def set_ass(self, ass: AssFile | None):
         self._ass = ass
-        self._font_correction: float | None = None  # recompute for new font
+        self._font_corrections.clear()
         self._selected.clear()
         self._cancel_editing()
         self.update()
@@ -350,38 +354,90 @@ class VideoFrameWidget(QWidget):
 
     # ── Label geometry ──
 
-    def _font_for_label(self, label: LabelDialogue | None = None) -> QFont:
+    def _get_font_correction(self, font_name: str, bold: bool, italic: bool) -> float:
+        key = (font_name, bold, italic)
+        if key not in self._font_corrections:
+            probe = QFont(font_name)
+            probe.setPixelSize(96)
+            probe.setBold(bold)
+            probe.setItalic(italic)
+            self._font_corrections[key] = _libass_font_correction(probe)
+        return self._font_corrections[key]
+
+    def _style_for_label(self, label: LabelDialogue) -> tuple[str, int, bool, bool]:
+        """Return (font_name, font_size, bold, italic) for a label, applying style + overrides."""
+        if not self._ass:
+            return ("Arial", 36, False, False)
+        style = self._ass.styles.get(label.style_name)
+        if style:
+            font_name = style.font_name
+            base_size = label.font_size if label.font_size is not None else style.font_size
+            bold = label.bold if label.bold is not None else style.bold
+            italic = label.italic if label.italic is not None else style.italic
+        else:
+            font_name = self._ass.label_font_name
+            base_size = label.font_size if label.font_size is not None else self._ass.label_font_size
+            bold = label.bold if label.bold is not None else self._ass.label_bold
+            italic = label.italic if label.italic is not None else self._ass.label_italic
+        return (font_name, base_size, bold, italic)
+
+    def _font_for_label(self, label: LabelDialogue | None = None, bold_override: bool | None = None, italic_override: bool | None = None) -> QFont:
         if not self._ass:
             return QFont("Arial", 16)
-        # Lazily compute correction factor for the Label style font
-        if self._font_correction is None:
-            probe = QFont(self._ass.label_font_name)
-            probe.setPixelSize(96)
-            probe.setBold(self._ass.label_bold)
-            probe.setItalic(self._ass.label_italic)
-            self._font_correction = _libass_font_correction(probe)
+        if label:
+            font_name, base_size, bold, italic = self._style_for_label(label)
+        else:
+            font_name = self._ass.label_font_name
+            base_size = self._ass.label_font_size
+            bold = self._ass.label_bold
+            italic = self._ass.label_italic
+        if bold_override is not None:
+            bold = bold_override
+        if italic_override is not None:
+            italic = italic_override
+        correction = self._get_font_correction(font_name, bold, italic)
         scale = self._frame_h / self._ass.play_res_y
-        base_size = self._ass.label_font_size
-        if label and label.font_size is not None:
-            base_size = label.font_size
-        pixel_size = max(int(base_size * scale * self._font_correction), 8)
-        font = QFont(self._ass.label_font_name)
+        pixel_size = max(int(base_size * scale * correction), 8)
+        font = QFont(font_name)
         font.setPixelSize(pixel_size)
-        font.setBold(self._ass.label_bold)
-        font.setItalic(self._ass.label_italic)
+        font.setBold(bold)
+        font.setItalic(italic)
         font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
         return font
 
     def _compute_rect(self, label: LabelDialogue, font: QFont) -> QRectF:
-        fm = QFontMetricsF(font)
-        # Split on \N for multi-line
-        lines = label.text.split("\\N") if "\\N" in label.text else [label.text]
-        max_w = max(fm.horizontalAdvance(line) for line in lines)
-        line_h = fm.height()
-        total_text_h = line_h * len(lines)
+        font_name, base_size, default_bold, default_italic = self._style_for_label(label)
+        segments = parse_rich_text(label.rich_text, default_bold, default_italic)
+
+        # Split segments by \N into lines of segments
+        seg_lines: list[list] = [[]]
+        for seg in segments:
+            parts = seg.text.split("\\N")
+            for i, part in enumerate(parts):
+                if i > 0:
+                    seg_lines.append([])
+                if part:
+                    from ass_parser import TextSegment
+                    seg_lines[-1].append(TextSegment(part, seg.bold, seg.italic))
+
+        max_w = 0.0
+        max_line_h = 0.0
+        for seg_line in seg_lines:
+            line_w = 0.0
+            line_h = 0.0
+            for seg in seg_line:
+                seg_font = self._font_for_label(label, bold_override=seg.bold, italic_override=seg.italic)
+                seg_fm = QFontMetricsF(seg_font)
+                line_w += seg_fm.horizontalAdvance(seg.text)
+                line_h = max(line_h, seg_fm.height())
+            if not seg_line:
+                line_h = QFontMetricsF(font).height()
+            max_w = max(max_w, line_w)
+            max_line_h = max(max_line_h, line_h)
+
         pad_x, pad_y = 6, 4
         total_w = max_w + 2 * pad_x
-        total_h = total_text_h + 2 * pad_y
+        total_h = max_line_h * len(seg_lines) + 2 * pad_y
         pos = self._ass_to_widget(label.pos_x, label.pos_y)
         alignment = label.alignment if label.alignment is not None else (self._ass.label_alignment if self._ass else 2)
 
@@ -475,18 +531,54 @@ class VideoFrameWidget(QWidget):
                 painter.setPen(QColor(255, 255, 255))
                 text_rect = rect.adjusted(6, 4, -6, -4)
 
-                # Multi-line rendering: split on \N
-                lines = label.text.split("\\N") if "\\N" in label.text else [label.text]
-                fm = QFontMetricsF(font)
-                line_h = fm.height()
-                for i, line in enumerate(lines):
-                    line_rect = QRectF(
-                        text_rect.x(),
-                        text_rect.y() + i * line_h,
-                        text_rect.width(),
-                        line_h,
-                    )
-                    painter.drawText(line_rect, Qt.AlignmentFlag.AlignCenter, line)
+                # Segment-aware multi-line rendering
+                font_name, base_size, default_bold, default_italic = self._style_for_label(label)
+                segments = parse_rich_text(label.rich_text, default_bold, default_italic)
+
+                # Split segments by \N into lines
+                from ass_parser import TextSegment
+                seg_lines: list[list[TextSegment]] = [[]]
+                for seg in segments:
+                    parts = seg.text.split("\\N")
+                    for pi, part in enumerate(parts):
+                        if pi > 0:
+                            seg_lines.append([])
+                        if part:
+                            seg_lines[-1].append(TextSegment(part, seg.bold, seg.italic))
+
+                # Compute max line height
+                max_line_h = QFontMetricsF(font).height()
+                for seg_line in seg_lines:
+                    for seg in seg_line:
+                        seg_font = self._font_for_label(label, bold_override=seg.bold, italic_override=seg.italic)
+                        max_line_h = max(max_line_h, QFontMetricsF(seg_font).height())
+
+                alignment = label.alignment if label.alignment is not None else (self._ass.label_alignment if self._ass else 2)
+                h_align = ((alignment - 1) % 3) + 1  # 1=left, 2=center, 3=right
+
+                for li, seg_line in enumerate(seg_lines):
+                    # Measure total line width for alignment
+                    line_w = 0.0
+                    for seg in seg_line:
+                        seg_font = self._font_for_label(label, bold_override=seg.bold, italic_override=seg.italic)
+                        line_w += QFontMetricsF(seg_font).horizontalAdvance(seg.text)
+
+                    if h_align == 1:
+                        x_offset = text_rect.x()
+                    elif h_align == 3:
+                        x_offset = text_rect.right() - line_w
+                    else:
+                        x_offset = text_rect.x() + (text_rect.width() - line_w) / 2
+                    y_pos = text_rect.y() + li * max_line_h
+
+                    for seg in seg_line:
+                        seg_font = self._font_for_label(label, bold_override=seg.bold, italic_override=seg.italic)
+                        seg_fm = QFontMetricsF(seg_font)
+                        painter.setFont(seg_font)
+                        painter.setPen(QColor(255, 255, 255))
+                        seg_rect = QRectF(x_offset, y_pos, seg_fm.horizontalAdvance(seg.text), max_line_h)
+                        painter.drawText(seg_rect, Qt.AlignmentFlag.AlignVCenter, seg.text)
+                        x_offset += seg_fm.horizontalAdvance(seg.text)
 
         # Draw hovered label timestamp
         if self._hovered_label is not None:
@@ -760,8 +852,13 @@ class VideoFrameWidget(QWidget):
 
         edit = QTextEdit(self)
         edit.setFont(font)
-        # Convert \N to real newlines for editing
-        edit.setPlainText(label.text.replace("\\N", "\n"))
+        edit.setAcceptRichText(True)
+
+        # Parse rich_text into segments and convert to HTML
+        font_name, base_size, default_bold, default_italic = self._style_for_label(label)
+        segments = parse_rich_text(label.rich_text, default_bold, default_italic)
+        html = segments_to_html(segments)
+        edit.setHtml(html)
 
         # Style the editor
         edit.setStyleSheet(
@@ -789,13 +886,20 @@ class VideoFrameWidget(QWidget):
     def _commit_editing(self):
         if not self._text_edit or not self._editing_label:
             return
-        new_text = self._text_edit.toPlainText().replace("\n", "\\N")
         label = self._editing_label
+        html = self._text_edit.toHtml()
+        segments = html_to_segments(html)
+        # Get style defaults
+        font_name, base_size, default_bold, default_italic = self._style_for_label(label)
+        rich_text = segments_to_ass(segments, default_bold, default_italic)
         self._cleanup_edit_widget()
-        self.text_edited.emit(label, new_text)
+        self.text_edited.emit(label, rich_text)
 
     def _cancel_editing(self):
+        was_editing = self._editing_label is not None
         self._cleanup_edit_widget()
+        if was_editing:
+            self.editing_cancelled.emit()
 
     def _cleanup_edit_widget(self):
         if self._text_edit:
@@ -812,10 +916,37 @@ class VideoFrameWidget(QWidget):
                 if event.key() == Qt.Key.Key_Escape:
                     self._cancel_editing()
                     return True
+                # Ctrl+B / Ctrl+I: toggle bold/italic on selection
+                if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                    if event.key() == Qt.Key.Key_B:
+                        self._toggle_editor_bold()
+                        return True
+                    elif event.key() == Qt.Key.Key_I:
+                        self._toggle_editor_italic()
+                        return True
             elif event.type() == QEvent.Type.FocusOut:
                 self._commit_editing()
                 return True
         return super().eventFilter(obj, event)
+
+    def _toggle_editor_bold(self):
+        if not self._text_edit:
+            return
+        from PyQt6.QtGui import QTextCharFormat
+        fmt = self._text_edit.currentCharFormat()
+        is_bold = fmt.fontWeight() >= QFont.Weight.Bold
+        new_fmt = QTextCharFormat()
+        new_fmt.setFontWeight(QFont.Weight.Normal if is_bold else QFont.Weight.Bold)
+        self._text_edit.mergeCurrentCharFormat(new_fmt)
+
+    def _toggle_editor_italic(self):
+        if not self._text_edit:
+            return
+        from PyQt6.QtGui import QTextCharFormat
+        fmt = self._text_edit.currentCharFormat()
+        new_fmt = QTextCharFormat()
+        new_fmt.setFontItalic(not fmt.fontItalic())
+        self._text_edit.mergeCurrentCharFormat(new_fmt)
 
     # ── Frame prefetch ──
 
