@@ -1,5 +1,23 @@
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+@dataclass
+class AssStyle:
+    name: str
+    font_name: str = "Arial"
+    font_size: int = 36
+    bold: bool = False
+    italic: bool = False
+    alignment: int = 2
+    raw_fields: list[str] = field(default_factory=list)
+
+
+@dataclass
+class TextSegment:
+    text: str
+    bold: bool
+    italic: bool
 
 
 @dataclass
@@ -12,6 +30,10 @@ class LabelDialogue:
     text: str
     font_size: int | None = None  # per-label \fs override; None = style default
     alignment: int | None = None  # per-label \an override; None = style default
+    style_name: str = "Label"
+    bold: bool | None = None  # per-label \b override in leading block
+    italic: bool | None = None  # per-label \i override in leading block
+    rich_text: str = ""  # text with inline override blocks (leading block stripped)
 
 
 def _time_to_seconds(t: str) -> float:
@@ -32,11 +54,183 @@ def _seconds_to_time(sec: float) -> str:
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
-_POS_RE = re.compile(r"\{[^}]*\\pos\((\d+(?:\.\d+)?),(\d+(?:\.\d+)?)\)[^}]*\}")
-_POS_TAG_RE = re.compile(r"\\pos\([\d.]+,[\d.]+\)")
+_POS_RE = re.compile(r"\{[^}]*\\pos\((-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)\)[^}]*\}")
+_POS_TAG_RE = re.compile(r"\\pos\(-?[\d.]+,-?[\d.]+\)")
 _FS_TAG_RE = re.compile(r"\\fs(\d+)")
 _AN_TAG_RE = re.compile(r"\\an(\d)")
+_B_TAG_RE = re.compile(r"\\b(\d)")
+_I_TAG_RE = re.compile(r"\\i(\d)")
 _OVERRIDE_BLOCK_RE = re.compile(r"\{[^}]*\}")
+_LEADING_BLOCK_RE = re.compile(r"^\{[^}]*\}")
+
+
+def parse_rich_text(rich_text: str, default_bold: bool, default_italic: bool) -> list[TextSegment]:
+    """Parse rich_text (with inline override blocks) into TextSegments."""
+    segments: list[TextSegment] = []
+    cur_bold = default_bold
+    cur_italic = default_italic
+    pos = 0
+    text = rich_text
+
+    while pos < len(text):
+        if text[pos] == '{':
+            end = text.find('}', pos)
+            if end == -1:
+                # No closing brace, treat rest as text
+                segments.append(TextSegment(text[pos:], cur_bold, cur_italic))
+                break
+            block = text[pos:end + 1]
+            # Process bold/italic tags in this block
+            for bm in _B_TAG_RE.finditer(block):
+                cur_bold = bm.group(1) != '0'
+            for im in _I_TAG_RE.finditer(block):
+                cur_italic = im.group(1) != '0'
+            pos = end + 1
+        else:
+            # Find next override block or end
+            next_block = text.find('{', pos)
+            if next_block == -1:
+                chunk = text[pos:]
+                pos = len(text)
+            else:
+                chunk = text[pos:next_block]
+                pos = next_block
+            if chunk:
+                segments.append(TextSegment(chunk, cur_bold, cur_italic))
+
+    return segments if segments else [TextSegment("", default_bold, default_italic)]
+
+
+def segments_to_ass(segments: list[TextSegment], default_bold: bool, default_italic: bool) -> str:
+    """Convert TextSegments back to ASS text with minimal inline override blocks."""
+    result: list[str] = []
+    cur_bold = default_bold
+    cur_italic = default_italic
+
+    for seg in segments:
+        tags: list[str] = []
+        if seg.bold != cur_bold:
+            tags.append(f"\\b{'1' if seg.bold else '0'}")
+            cur_bold = seg.bold
+        if seg.italic != cur_italic:
+            tags.append(f"\\i{'1' if seg.italic else '0'}")
+            cur_italic = seg.italic
+        if tags:
+            result.append("{" + "".join(tags) + "}")
+        result.append(seg.text)
+
+    return "".join(result)
+
+
+def segments_to_html(segments: list[TextSegment]) -> str:
+    """Convert TextSegments to HTML for QTextEdit."""
+    parts: list[str] = []
+    for seg in segments:
+        text = seg.text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        # Convert \N to actual newlines for HTML
+        text = text.replace("\\N", "<br>")
+        if seg.bold and seg.italic:
+            parts.append(f"<b><i>{text}</i></b>")
+        elif seg.bold:
+            parts.append(f"<b>{text}</b>")
+        elif seg.italic:
+            parts.append(f"<i>{text}</i>")
+        else:
+            parts.append(text)
+    return "".join(parts)
+
+
+def html_to_segments(html: str) -> list[TextSegment]:
+    """Parse Qt HTML output into TextSegments.
+
+    Qt's toHtml() produces a full document with <head>/<style> blocks.
+    We skip everything outside <body> and inside <style>/<head> tags.
+    """
+    from html.parser import HTMLParser
+
+    segments: list[TextSegment] = []
+    bold_stack: list[bool] = [False]
+    italic_stack: list[bool] = [False]
+    skip_depth: int = 0  # > 0 means we're inside <head>/<style>, skip text
+    p_count: int = 0  # track paragraph boundaries for \N insertion
+
+    class Parser(HTMLParser):
+        nonlocal skip_depth, p_count
+
+        def handle_starttag(self, tag, attrs):
+            nonlocal skip_depth, p_count
+            if tag in ("head", "style"):
+                skip_depth += 1
+                return
+            if skip_depth > 0:
+                return
+            attr_dict = dict(attrs)
+            style = attr_dict.get("style", "")
+            if tag == "p":
+                # Each <p> after the first means a line break (Enter key)
+                if p_count > 0:
+                    segments.append(TextSegment("\\N", bold_stack[-1], italic_stack[-1]))
+                p_count += 1
+            elif tag in ("b", "strong"):
+                bold_stack.append(True)
+            elif tag in ("i", "em"):
+                italic_stack.append(True)
+            elif tag == "span":
+                # Qt uses inline styles like font-weight:700 and font-style:italic
+                is_bold = bold_stack[-1]
+                is_italic = italic_stack[-1]
+                if "font-weight:" in style:
+                    weight_match = re.search(r"font-weight:\s*(\w+)", style)
+                    if weight_match:
+                        val = weight_match.group(1)
+                        is_bold = val in ("bold", "700", "800", "900")
+                if "font-style:" in style:
+                    style_match = re.search(r"font-style:\s*(\w+)", style)
+                    if style_match:
+                        is_italic = style_match.group(1) == "italic"
+                bold_stack.append(is_bold)
+                italic_stack.append(is_italic)
+            elif tag == "br":
+                segments.append(TextSegment("\\N", bold_stack[-1], italic_stack[-1]))
+
+        def handle_endtag(self, tag):
+            nonlocal skip_depth
+            if tag in ("head", "style"):
+                skip_depth = max(0, skip_depth - 1)
+                return
+            if skip_depth > 0:
+                return
+            if tag in ("b", "strong") and len(bold_stack) > 1:
+                bold_stack.pop()
+            elif tag in ("i", "em") and len(italic_stack) > 1:
+                italic_stack.pop()
+            elif tag == "span":
+                if len(bold_stack) > 1:
+                    bold_stack.pop()
+                if len(italic_stack) > 1:
+                    italic_stack.pop()
+
+        def handle_data(self, data):
+            if skip_depth > 0 or not data:
+                return
+            # Skip whitespace-only runs (inter-tag whitespace from Qt's HTML)
+            if not data.strip():
+                return
+            segments.append(TextSegment(data, bold_stack[-1], italic_stack[-1]))
+
+    parser = Parser()
+    parser.feed(html)
+
+    # Merge adjacent segments with same formatting
+    if not segments:
+        return [TextSegment("", False, False)]
+    merged: list[TextSegment] = [segments[0]]
+    for seg in segments[1:]:
+        if seg.bold == merged[-1].bold and seg.italic == merged[-1].italic:
+            merged[-1] = TextSegment(merged[-1].text + seg.text, seg.bold, seg.italic)
+        else:
+            merged.append(seg)
+    return merged
 
 
 class AssFile:
@@ -45,13 +239,34 @@ class AssFile:
         self.lines: list[str] = []
         self.play_res_x: int = 1920
         self.play_res_y: int = 1080
-        self.label_font_name: str = "Arial"
-        self.label_font_size: int = 36
-        self.label_bold: bool = False
-        self.label_italic: bool = False
-        self.label_alignment: int = 2
+        self.styles: dict[str, AssStyle] = {}
         self.labels: list[LabelDialogue] = []
         self._parse(path)
+
+    @property
+    def label_font_name(self) -> str:
+        s = self.styles.get("Label")
+        return s.font_name if s else (next(iter(self.styles.values())).font_name if self.styles else "Arial")
+
+    @property
+    def label_font_size(self) -> int:
+        s = self.styles.get("Label")
+        return s.font_size if s else (next(iter(self.styles.values())).font_size if self.styles else 36)
+
+    @property
+    def label_bold(self) -> bool:
+        s = self.styles.get("Label")
+        return s.bold if s else (next(iter(self.styles.values())).bold if self.styles else False)
+
+    @property
+    def label_italic(self) -> bool:
+        s = self.styles.get("Label")
+        return s.italic if s else (next(iter(self.styles.values())).italic if self.styles else False)
+
+    @property
+    def label_alignment(self) -> int:
+        s = self.styles.get("Label")
+        return s.alignment if s else (next(iter(self.styles.values())).alignment if self.styles else 2)
 
     def _parse(self, path: str):
         with open(path, "r", encoding="utf-8-sig") as f:
@@ -69,35 +284,34 @@ class AssFile:
             elif stripped.startswith("PlayResY:"):
                 self.play_res_y = int(stripped.split(":", 1)[1].strip())
 
-        # Parse Label style from [V4+ Styles]
+        # Parse all styles from [V4+ Styles]
+        self.styles.clear()
         for line in self.lines:
             stripped = line.strip()
-            if stripped.startswith("Style:") and ",Label," in stripped or (
-                stripped.startswith("Style: Label,")
-                or stripped.startswith("Style:Label,")
-            ):
+            if stripped.startswith("Style:"):
                 parts = stripped.split("Style:", 1)[1].split(",")
                 name = parts[0].strip()
-                if name == "Label":
-                    self.label_font_name = parts[1].strip() if len(parts) > 1 else "Arial"
-                    self.label_font_size = (
-                        int(parts[2].strip()) if len(parts) > 2 else 36
-                    )
-                    # Bold is field index 7, Italic is field index 8
-                    if len(parts) > 7:
-                        self.label_bold = parts[7].strip() == "1"
-                    if len(parts) > 8:
-                        self.label_italic = parts[8].strip() == "1"
-                    # Alignment is field index 18 in SSA v4+ style format
-                    if len(parts) > 18:
-                        try:
-                            self.label_alignment = int(parts[18].strip())
-                        except ValueError:
-                            self.label_alignment = 2
-                    break
+                font_name = parts[1].strip() if len(parts) > 1 else "Arial"
+                font_size = int(parts[2].strip()) if len(parts) > 2 else 36
+                bold = parts[7].strip() == "1" if len(parts) > 7 else False
+                italic = parts[8].strip() == "1" if len(parts) > 8 else False
+                alignment = 2
+                if len(parts) > 18:
+                    try:
+                        alignment = int(parts[18].strip())
+                    except ValueError:
+                        alignment = 2
+                self.styles[name] = AssStyle(
+                    name=name,
+                    font_name=font_name,
+                    font_size=font_size,
+                    bold=bold,
+                    italic=italic,
+                    alignment=alignment,
+                    raw_fields=parts,
+                )
 
-        # Parse [Events] dialogues for Label style with \pos()
-        # Format: Dialogue: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
+        # Parse [Events] dialogues with \pos() whose style is in self.styles
         self.labels.clear()
         for i, line in enumerate(self.lines):
             stripped = line.strip()
@@ -109,7 +323,7 @@ class AssFile:
             if len(parts) < 10:
                 continue
             style = parts[3].strip()
-            if style != "Label":
+            if style not in self.styles:
                 continue
             start_str = parts[1].strip()
             end_str = parts[2].strip()
@@ -121,16 +335,29 @@ class AssFile:
 
             pos_x = int(float(m.group(1)))
             pos_y = int(float(m.group(2)))
-            # Extract display text: strip ALL override blocks
-            display_text = _OVERRIDE_BLOCK_RE.sub("", text_field).strip()
 
-            # Parse per-label \fs override
-            fs_match = _FS_TAG_RE.search(text_field)
+            # Extract the leading override block (the one with \pos)
+            leading_match = _LEADING_BLOCK_RE.search(text_field)
+            leading_block = leading_match.group(0) if leading_match else ""
+
+            # rich_text = everything after the leading block
+            rich_text = text_field[len(leading_block):].strip() if leading_block else text_field.strip()
+
+            # Display text: strip ALL override blocks from rich_text
+            display_text = _OVERRIDE_BLOCK_RE.sub("", rich_text).strip()
+
+            # Parse per-label overrides from leading block only
+            fs_match = _FS_TAG_RE.search(leading_block)
             font_size = int(fs_match.group(1)) if fs_match else None
 
-            # Parse per-label \an override
-            an_match = _AN_TAG_RE.search(text_field)
+            an_match = _AN_TAG_RE.search(leading_block)
             alignment = int(an_match.group(1)) if an_match else None
+
+            b_match = _B_TAG_RE.search(leading_block)
+            bold = (b_match.group(1) != '0') if b_match else None
+
+            i_match = _I_TAG_RE.search(leading_block)
+            italic = (i_match.group(1) != '0') if i_match else None
 
             self.labels.append(
                 LabelDialogue(
@@ -142,6 +369,10 @@ class AssFile:
                     text=display_text,
                     font_size=font_size,
                     alignment=alignment,
+                    style_name=style,
+                    bold=bold,
+                    italic=italic,
+                    rich_text=rich_text,
                 )
             )
 
@@ -183,9 +414,62 @@ class AssFile:
             )
         self.lines[label.line_index] = new_line
 
+    def set_label_bold(self, label: LabelDialogue, bold: bool):
+        """Set/update \\b in the leading override block for a label."""
+        label.bold = bold
+        old_line = self.lines[label.line_index]
+        tag = rf"\b{1 if bold else 0}"
+        # Check if there's already a \b tag in the leading block
+        leading_match = _LEADING_BLOCK_RE.search(old_line.split(",", 9)[9] if old_line.strip().startswith("Dialogue:") else old_line)
+        if leading_match:
+            block = leading_match.group(0)
+            b_match = _B_TAG_RE.search(block)
+            if b_match:
+                new_block = block[:b_match.start()] + tag + block[b_match.end():]
+                new_line = old_line.replace(block, new_block, 1)
+            else:
+                # Insert after \pos(...)
+                new_line = _POS_TAG_RE.sub(
+                    lambda m: m.group(0) + tag, old_line, count=1
+                )
+            self.lines[label.line_index] = new_line
+
+    def set_label_italic(self, label: LabelDialogue, italic: bool):
+        """Set/update \\i in the leading override block for a label."""
+        label.italic = italic
+        old_line = self.lines[label.line_index]
+        tag = rf"\i{1 if italic else 0}"
+        leading_match = _LEADING_BLOCK_RE.search(old_line.split(",", 9)[9] if old_line.strip().startswith("Dialogue:") else old_line)
+        if leading_match:
+            block = leading_match.group(0)
+            i_match = _I_TAG_RE.search(block)
+            if i_match:
+                new_block = block[:i_match.start()] + tag + block[i_match.end():]
+                new_line = old_line.replace(block, new_block, 1)
+            else:
+                new_line = _POS_TAG_RE.sub(
+                    lambda m: m.group(0) + tag, old_line, count=1
+                )
+            self.lines[label.line_index] = new_line
+
+    def set_label_style(self, label: LabelDialogue, style_name: str):
+        """Change the style (field 3) in the raw dialogue line."""
+        if style_name not in self.styles:
+            return
+        label.style_name = style_name
+        old_line = self.lines[label.line_index]
+        stripped = old_line.strip()
+        after = stripped.split("Dialogue:", 1)[1]
+        parts = after.split(",", 9)
+        if len(parts) < 10:
+            return
+        parts[3] = style_name
+        self.lines[label.line_index] = "Dialogue:" + ",".join(parts)
+
     def set_label_text(self, label: LabelDialogue, new_text: str):
         """Update display text, preserving the override block."""
         label.text = new_text
+        label.rich_text = new_text
         old_line = self.lines[label.line_index]
         # Split into the 10 dialogue fields
         stripped = old_line.strip()
@@ -194,13 +478,29 @@ class AssFile:
         if len(parts) < 10:
             return
         old_text_field = parts[9]
-        # Extract override blocks from the old text field
-        overrides = _OVERRIDE_BLOCK_RE.findall(old_text_field)
-        override_prefix = "".join(overrides)
-        # Rebuild: override block(s) + new display text
-        parts[9] = override_prefix + new_text + "\n"
+        # Extract the leading override block
+        leading_match = _LEADING_BLOCK_RE.search(old_text_field)
+        leading_block = leading_match.group(0) if leading_match else ""
+        # Rebuild: leading block + new display text
+        parts[9] = leading_block + new_text + "\n"
         new_after = ",".join(parts)
         self.lines[label.line_index] = "Dialogue:" + new_after
+
+    def set_label_rich_text(self, label: LabelDialogue, rich_text: str):
+        """Update text content with rich formatting (inline override blocks)."""
+        label.rich_text = rich_text
+        label.text = _OVERRIDE_BLOCK_RE.sub("", rich_text).strip()
+        old_line = self.lines[label.line_index]
+        stripped = old_line.strip()
+        after = stripped.split("Dialogue:", 1)[1]
+        parts = after.split(",", 9)
+        if len(parts) < 10:
+            return
+        old_text_field = parts[9]
+        leading_match = _LEADING_BLOCK_RE.search(old_text_field)
+        leading_block = leading_match.group(0) if leading_match else ""
+        parts[9] = leading_block + rich_text + "\n"
+        self.lines[label.line_index] = "Dialogue:" + ",".join(parts)
 
     def add_label(
         self,
@@ -211,6 +511,10 @@ class AssFile:
         text: str,
         font_size: int | None = None,
         alignment: int | None = None,
+        style_name: str = "Label",
+        bold: bool | None = None,
+        italic: bool | None = None,
+        rich_text: str = "",
     ) -> LabelDialogue:
         """Insert a new Dialogue line for a label. Returns the new LabelDialogue."""
         # Build the override block
@@ -219,11 +523,21 @@ class AssFile:
             override += rf"\an{alignment}"
         if font_size is not None:
             override += rf"\fs{font_size}"
+        if bold is not None:
+            override += rf"\b{1 if bold else 0}"
+        if italic is not None:
+            override += rf"\i{1 if italic else 0}"
         override += "}"
 
+        # Use the actual style name, falling back to first available style
+        actual_style = style_name
+        if actual_style not in self.styles and self.styles:
+            actual_style = next(iter(self.styles))
+
+        content = rich_text if rich_text else text
         start_str = _seconds_to_time(start_time)
         end_str = _seconds_to_time(end_time)
-        line = f"Dialogue: 0,{start_str},{end_str},Label,,0,0,0,,{override}{text}\n"
+        line = f"Dialogue: 0,{start_str},{end_str},{actual_style},,0,0,0,,{override}{content}\n"
 
         # Find insertion point: after last Dialogue line, or at end
         insert_idx = len(self.lines)
@@ -239,15 +553,20 @@ class AssFile:
             if lb.line_index >= insert_idx:
                 lb.line_index += 1
 
+        display_text = _OVERRIDE_BLOCK_RE.sub("", rich_text).strip() if rich_text else text
         new_label = LabelDialogue(
             line_index=insert_idx,
             start_time=start_time,
             end_time=end_time,
             pos_x=pos_x,
             pos_y=pos_y,
-            text=text,
+            text=display_text,
             font_size=font_size,
             alignment=alignment,
+            style_name=actual_style,
+            bold=bold,
+            italic=italic,
+            rich_text=rich_text if rich_text else text,
         )
         self.labels.append(new_label)
         return new_label
@@ -279,6 +598,10 @@ class AssFile:
             text=label.text,
             font_size=label.font_size,
             alignment=label.alignment,
+            style_name=label.style_name,
+            bold=label.bold,
+            italic=label.italic,
+            rich_text=label.rich_text,
         )
 
     def merge_labels(
@@ -301,6 +624,9 @@ class AssFile:
             text=merged_text,
             font_size=anchor.font_size,
             alignment=anchor.alignment,
+            style_name=anchor.style_name,
+            bold=anchor.bold,
+            italic=anchor.italic,
         )
 
     def save(self, path: str | None = None):
