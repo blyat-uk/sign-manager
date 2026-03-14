@@ -10,6 +10,9 @@ class AssStyle:
     bold: bool = False
     italic: bool = False
     alignment: int = 2
+    primary_colour: str = "&H00FFFFFF&"
+    outline_colour: str = "&H00000000&"
+    outline_width: float = 2.0
     raw_fields: list[str] = field(default_factory=list)
 
 
@@ -33,6 +36,10 @@ class LabelDialogue:
     style_name: str = "Label"
     bold: bool | None = None  # per-label \b override in leading block
     italic: bool | None = None  # per-label \i override in leading block
+    primary_colour: str | None = None  # per-label \c override
+    outline_colour: str | None = None  # per-label \3c override
+    outline_width: float | None = None  # per-label \bord override
+    rotation: float | None = None  # per-label \frz override in degrees
     rich_text: str = ""  # text with inline override blocks (leading block stripped)
 
 
@@ -60,6 +67,10 @@ _FS_TAG_RE = re.compile(r"\\fs(\d+)")
 _AN_TAG_RE = re.compile(r"\\an(\d)")
 _B_TAG_RE = re.compile(r"\\b(\d)")
 _I_TAG_RE = re.compile(r"\\i(\d)")
+_C_TAG_RE = re.compile(r"\\(?:1c|c)(&H[0-9A-Fa-f]+&)")
+_3C_TAG_RE = re.compile(r"\\3c(&H[0-9A-Fa-f]+&)")
+_BORD_TAG_RE = re.compile(r"\\bord([\d.]+)")
+_FRZ_TAG_RE = re.compile(r"\\frz?(-?[\d.]+)")
 _OVERRIDE_BLOCK_RE = re.compile(r"\{[^}]*\}")
 _LEADING_BLOCK_RE = re.compile(r"^\{[^}]*\}")
 
@@ -301,6 +312,14 @@ class AssFile:
                         alignment = int(parts[18].strip())
                     except ValueError:
                         alignment = 2
+                primary_colour = parts[3].strip() if len(parts) > 3 else "&H00FFFFFF&"
+                outline_colour = parts[5].strip() if len(parts) > 5 else "&H00000000&"
+                outline_width = 2.0
+                if len(parts) > 16:
+                    try:
+                        outline_width = float(parts[16].strip())
+                    except ValueError:
+                        outline_width = 2.0
                 self.styles[name] = AssStyle(
                     name=name,
                     font_name=font_name,
@@ -308,6 +327,9 @@ class AssFile:
                     bold=bold,
                     italic=italic,
                     alignment=alignment,
+                    primary_colour=primary_colour,
+                    outline_colour=outline_colour,
+                    outline_width=outline_width,
                     raw_fields=parts,
                 )
 
@@ -359,6 +381,18 @@ class AssFile:
             i_match = _I_TAG_RE.search(leading_block)
             italic = (i_match.group(1) != '0') if i_match else None
 
+            c_match = _C_TAG_RE.search(leading_block)
+            primary_colour = c_match.group(1) if c_match else None
+
+            c3_match = _3C_TAG_RE.search(leading_block)
+            outline_colour = c3_match.group(1) if c3_match else None
+
+            bord_match = _BORD_TAG_RE.search(leading_block)
+            outline_width = float(bord_match.group(1)) if bord_match else None
+
+            frz_match = _FRZ_TAG_RE.search(leading_block)
+            rotation = float(frz_match.group(1)) if frz_match else None
+
             self.labels.append(
                 LabelDialogue(
                     line_index=i,
@@ -372,6 +406,10 @@ class AssFile:
                     style_name=style,
                     bold=bold,
                     italic=italic,
+                    primary_colour=primary_colour,
+                    outline_colour=outline_colour,
+                    outline_width=outline_width,
+                    rotation=rotation,
                     rich_text=rich_text,
                 )
             )
@@ -452,19 +490,113 @@ class AssFile:
                 )
             self.lines[label.line_index] = new_line
 
-    def set_label_style(self, label: LabelDialogue, style_name: str):
-        """Change the style (field 3) in the raw dialogue line."""
-        if style_name not in self.styles:
-            return
-        label.style_name = style_name
+    def set_label_primary_colour(self, label: LabelDialogue, colour: str):
+        """Set/update \\c (primary colour) in the leading override block."""
+        label.primary_colour = colour
+        old_line = self.lines[label.line_index]
+        tag = rf"\c{colour}"
+        leading_match = _LEADING_BLOCK_RE.search(old_line.split(",", 9)[9] if old_line.strip().startswith("Dialogue:") else old_line)
+        if leading_match:
+            block = leading_match.group(0)
+            c_match = _C_TAG_RE.search(block)
+            if c_match:
+                new_block = block[:c_match.start()] + tag + block[c_match.end():]
+                new_line = old_line.replace(block, new_block, 1)
+            else:
+                new_line = _POS_TAG_RE.sub(
+                    lambda m: m.group(0) + tag, old_line, count=1
+                )
+            self.lines[label.line_index] = new_line
+
+    def set_label_outline_colour(self, label: LabelDialogue, colour: str):
+        """Set/update \\3c (outline colour) in the leading override block."""
+        label.outline_colour = colour
+        old_line = self.lines[label.line_index]
+        tag = rf"\3c{colour}"
+        leading_match = _LEADING_BLOCK_RE.search(old_line.split(",", 9)[9] if old_line.strip().startswith("Dialogue:") else old_line)
+        if leading_match:
+            block = leading_match.group(0)
+            c3_match = _3C_TAG_RE.search(block)
+            if c3_match:
+                new_block = block[:c3_match.start()] + tag + block[c3_match.end():]
+                new_line = old_line.replace(block, new_block, 1)
+            else:
+                new_line = _POS_TAG_RE.sub(
+                    lambda m: m.group(0) + tag, old_line, count=1
+                )
+            self.lines[label.line_index] = new_line
+
+    def set_label_outline_width(self, label: LabelDialogue, width: float):
+        """Set/update \\bord (outline width) in the leading override block."""
+        label.outline_width = width
+        old_line = self.lines[label.line_index]
+        width_str = f"{width:g}"
+        tag = rf"\bord{width_str}"
+        leading_match = _LEADING_BLOCK_RE.search(old_line.split(",", 9)[9] if old_line.strip().startswith("Dialogue:") else old_line)
+        if leading_match:
+            block = leading_match.group(0)
+            bord_match = _BORD_TAG_RE.search(block)
+            if bord_match:
+                new_block = block[:bord_match.start()] + tag + block[bord_match.end():]
+                new_line = old_line.replace(block, new_block, 1)
+            else:
+                new_line = _POS_TAG_RE.sub(
+                    lambda m: m.group(0) + tag, old_line, count=1
+                )
+            self.lines[label.line_index] = new_line
+
+    def set_label_rotation(self, label: LabelDialogue, degrees: float):
+        """Set/update \\frz in the leading override block for a label."""
+        label.rotation = degrees
+        old_line = self.lines[label.line_index]
+        tag = rf"\frz{degrees:g}"
+        leading_match = _LEADING_BLOCK_RE.search(old_line.split(",", 9)[9] if old_line.strip().startswith("Dialogue:") else old_line)
+        if leading_match:
+            block = leading_match.group(0)
+            frz_match = _FRZ_TAG_RE.search(block)
+            if frz_match:
+                new_block = block[:frz_match.start()] + tag + block[frz_match.end():]
+                new_line = old_line.replace(block, new_block, 1)
+            else:
+                new_line = _POS_TAG_RE.sub(
+                    lambda m: m.group(0) + tag, old_line, count=1
+                )
+            self.lines[label.line_index] = new_line
+
+    def set_label_times(self, label: LabelDialogue, start: float, end: float):
+        """Update start/end times (fields 1 and 2) in the raw dialogue line."""
+        label.start_time = start
+        label.end_time = end
         old_line = self.lines[label.line_index]
         stripped = old_line.strip()
         after = stripped.split("Dialogue:", 1)[1]
         parts = after.split(",", 9)
         if len(parts) < 10:
             return
+        parts[1] = _seconds_to_time(start)
+        parts[2] = _seconds_to_time(end)
+        self.lines[label.line_index] = "Dialogue:" + ",".join(parts) + "\n"
+
+    def set_label_style(self, label: LabelDialogue, style_name: str):
+        """Change the style (field 3) in the raw dialogue line.
+
+        Also removes the inline \\fs override so the new style's font size
+        takes effect.
+        """
+        if style_name not in self.styles:
+            return
+        label.style_name = style_name
+        label.font_size = None
+        old_line = self.lines[label.line_index]
+        # Remove inline \fs override so new style's font size applies
+        old_line = _FS_TAG_RE.sub("", old_line)
+        stripped = old_line.strip()
+        after = stripped.split("Dialogue:", 1)[1]
+        parts = after.split(",", 9)
+        if len(parts) < 10:
+            return
         parts[3] = style_name
-        self.lines[label.line_index] = "Dialogue:" + ",".join(parts)
+        self.lines[label.line_index] = "Dialogue:" + ",".join(parts) + "\n"
 
     def set_label_text(self, label: LabelDialogue, new_text: str):
         """Update display text, preserving the override block."""
@@ -514,6 +646,10 @@ class AssFile:
         style_name: str = "Label",
         bold: bool | None = None,
         italic: bool | None = None,
+        primary_colour: str | None = None,
+        outline_colour: str | None = None,
+        outline_width: float | None = None,
+        rotation: float | None = None,
         rich_text: str = "",
     ) -> LabelDialogue:
         """Insert a new Dialogue line for a label. Returns the new LabelDialogue."""
@@ -527,6 +663,14 @@ class AssFile:
             override += rf"\b{1 if bold else 0}"
         if italic is not None:
             override += rf"\i{1 if italic else 0}"
+        if primary_colour is not None:
+            override += rf"\c{primary_colour}"
+        if outline_colour is not None:
+            override += rf"\3c{outline_colour}"
+        if outline_width is not None:
+            override += rf"\bord{outline_width:g}"
+        if rotation is not None:
+            override += rf"\frz{rotation:g}"
         override += "}"
 
         # Use the actual style name, falling back to first available style
@@ -566,6 +710,10 @@ class AssFile:
             style_name=actual_style,
             bold=bold,
             italic=italic,
+            primary_colour=primary_colour,
+            outline_colour=outline_colour,
+            outline_width=outline_width,
+            rotation=rotation,
             rich_text=rich_text if rich_text else text,
         )
         self.labels.append(new_label)
@@ -601,6 +749,10 @@ class AssFile:
             style_name=label.style_name,
             bold=label.bold,
             italic=label.italic,
+            primary_colour=label.primary_colour,
+            outline_colour=label.outline_colour,
+            outline_width=label.outline_width,
+            rotation=label.rotation,
             rich_text=label.rich_text,
         )
 
@@ -628,6 +780,113 @@ class AssFile:
             bold=anchor.bold,
             italic=anchor.italic,
         )
+
+    def add_style(self, name: str, template_style: AssStyle | None = None) -> AssStyle:
+        """Create a new style, optionally cloning a template. Returns the new AssStyle."""
+        if template_style:
+            new_fields = list(template_style.raw_fields)
+        else:
+            # Default 23-field ASS style
+            new_fields = [
+                name, "Arial", "36", "&H00FFFFFF&", "&H000000FF&",
+                "&H00000000&", "&H00000000&", "0", "0", "0", "0",
+                "100", "100", "0", "0", "1", "2", "0", "2",
+                "10", "10", "10", "1",
+            ]
+        new_fields[0] = " " + name
+        line_str = "Style:" + ",".join(new_fields) + "\n"
+
+        # Insert after the last Style: line
+        insert_idx = None
+        for i, line in enumerate(self.lines):
+            if line.strip().startswith("Style:"):
+                insert_idx = i + 1
+        if insert_idx is None:
+            # No styles found, insert before first Dialogue or at end
+            insert_idx = len(self.lines)
+            for i, line in enumerate(self.lines):
+                if line.strip().startswith("Dialogue:"):
+                    insert_idx = i
+                    break
+
+        self.lines.insert(insert_idx, line_str)
+
+        # Adjust line_index for all labels at or after insertion point
+        for lb in self.labels:
+            if lb.line_index >= insert_idx:
+                lb.line_index += 1
+
+        new_style = AssStyle(
+            name=name,
+            font_name=new_fields[1].strip(),
+            font_size=int(new_fields[2].strip()),
+            bold=new_fields[7].strip() == "1",
+            italic=new_fields[8].strip() == "1",
+            alignment=int(new_fields[18].strip()),
+            primary_colour=new_fields[3].strip(),
+            outline_colour=new_fields[5].strip(),
+            outline_width=float(new_fields[16].strip()),
+            raw_fields=new_fields,
+        )
+        self.styles[name] = new_style
+        return new_style
+
+    def update_style_field(self, style_name: str, field_index: int, value: str):
+        """Update a specific field in a style's definition and raw line."""
+        style = self.styles.get(style_name)
+        if not style:
+            return
+        style.raw_fields[field_index] = value
+
+        # Sync cached fields
+        if field_index == 1:
+            style.font_name = value.strip()
+        elif field_index == 2:
+            style.font_size = int(value.strip())
+        elif field_index == 3:
+            style.primary_colour = value.strip()
+        elif field_index == 5:
+            style.outline_colour = value.strip()
+        elif field_index == 7:
+            style.bold = value.strip() == "1"
+        elif field_index == 8:
+            style.italic = value.strip() == "1"
+        elif field_index == 16:
+            style.outline_width = float(value.strip())
+        elif field_index == 18:
+            style.alignment = int(value.strip())
+
+        # Rebuild the Style line in self.lines
+        for i, line in enumerate(self.lines):
+            stripped = line.strip()
+            if stripped.startswith("Style:"):
+                parts = stripped.split("Style:", 1)[1].split(",")
+                if parts[0].strip() == style_name:
+                    self.lines[i] = "Style:" + ",".join(style.raw_fields) + "\n"
+                    break
+
+    def remove_inline_tag(self, label: LabelDialogue, tag_regex: 're.Pattern', attr_name: str):
+        """Remove a specific inline tag from a label's leading override block."""
+        old_line = self.lines[label.line_index]
+        text_field = old_line.split(",", 9)[9] if old_line.strip().startswith("Dialogue:") else old_line
+        leading_match = _LEADING_BLOCK_RE.search(text_field)
+        if not leading_match:
+            return
+        block = leading_match.group(0)
+        match = tag_regex.search(block)
+        if not match:
+            return
+        # Remove the full match (tag + value) from the block
+        new_block = block[:match.start()] + block[match.end():]
+        new_line = old_line.replace(block, new_block, 1)
+        self.lines[label.line_index] = new_line
+        setattr(label, attr_name, None)
+
+    def remove_inline_tag_from_all(self, style_name: str, tag_regex: 're.Pattern', attr_name: str):
+        """Remove a specific inline tag from all labels using the given style."""
+        for label in self.labels:
+            if label.style_name == style_name:
+                self.remove_inline_tag(label, tag_regex, attr_name)
 
     def save(self, path: str | None = None):
         """Write the (possibly modified) .ass file back to disk."""
