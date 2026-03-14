@@ -6,8 +6,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QPointF, QRectF, QThread, pyqtSignal, QObject
-from PyQt6.QtGui import QColor, QCursor, QKeySequence, QDragEnterEvent, QDropEvent, QShortcut, QCloseEvent, QImage
+from PyQt6.QtCore import Qt, QPointF, QRectF, QThread, pyqtSignal, QObject, QThreadPool, QRunnable, QSettings, QSize
+from PyQt6.QtGui import QColor, QCursor, QKeySequence, QDragEnterEvent, QDropEvent, QShortcut, QCloseEvent, QImage, QFont
 from PyQt6.QtWidgets import (
     QMainWindow,
     QToolBar,
@@ -17,12 +17,23 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QDockWidget,
     QListWidget,
+    QListWidgetItem,
     QLabel,
     QWidget,
     QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QStackedWidget,
+    QDialog,
+    QDialogButtonBox,
+    QCheckBox,
 )
 
-from ass_parser import AssFile, LabelDialogue
+from ass_parser import (
+    AssFile, LabelDialogue, _seconds_to_time,
+    _FS_TAG_RE, _AN_TAG_RE, _B_TAG_RE, _I_TAG_RE,
+    _C_TAG_RE, _3C_TAG_RE, _BORD_TAG_RE,
+)
 from video_widget import VideoFrameWidget, VideoSetupWorker, detect_fps, _get_video_dimensions, extract_frame_as_image
 from gallery_widget import GalleryPanel, LabelGroup, compute_label_groups, _crop_to_labels_image, _best_representative_time
 from label_toolbar import LabelToolbar
@@ -60,36 +71,38 @@ class PreloadedFileData:
     thumbnails: dict[int, QImage] = field(default_factory=dict)
 
 
-class FolderPreloadWorker(QObject):
-    """Processes all folder files sequentially on a background thread."""
+class _FilePreloadSignals(QObject):
+    """Signals for a single file preload task (QRunnable can't have signals)."""
     file_ready = pyqtSignal(str, object)  # path, PreloadedFileData
-    all_done = pyqtSignal()
+    finished = pyqtSignal()
 
-    def __init__(self, file_paths: list[str]):
+
+class _FilePreloadTask(QRunnable):
+    """Processes a single video file on a QThreadPool thread."""
+
+    def __init__(self, path: str, cancelled: list[bool]):
         super().__init__()
-        self._file_paths = file_paths
-        self._cancelled = False
-
-    def cancel(self):
-        self._cancelled = True
+        self.signals = _FilePreloadSignals()
+        self._path = path
+        self._cancelled = cancelled
 
     def run(self):
-        for path in self._file_paths:
-            if self._cancelled:
-                break
+        try:
+            if self._cancelled[0]:
+                return
 
-            fps = detect_fps(path)
-            if self._cancelled:
-                break
-            dims = _get_video_dimensions(path)
-            if self._cancelled:
-                break
-            initial_frame = extract_frame_as_image(path, 0)
-            if self._cancelled:
-                break
+            fps = detect_fps(self._path)
+            if self._cancelled[0]:
+                return
+            dims = _get_video_dimensions(self._path)
+            if self._cancelled[0]:
+                return
+            initial_frame = extract_frame_as_image(self._path, 0)
+            if self._cancelled[0]:
+                return
 
             # Find matching .ass file
-            video = Path(path)
+            video = Path(self._path)
             ass_file: AssFile | None = None
             exact = video.with_suffix(".ass")
             if exact.is_file():
@@ -102,12 +115,12 @@ class FolderPreloadWorker(QObject):
             groups: list[LabelGroup] = []
             thumbnails: dict[int, QImage] = {}
 
-            if ass_file and not self._cancelled:
+            if ass_file and not self._cancelled[0]:
                 groups = compute_label_groups(ass_file.labels)
                 for i, group in enumerate(groups):
-                    if self._cancelled:
+                    if self._cancelled[0]:
                         break
-                    img = extract_frame_as_image(path, group.representative_time)
+                    img = extract_frame_as_image(self._path, group.representative_time)
                     if img and not img.isNull():
                         cropped = _crop_to_labels_image(
                             img, group,
@@ -118,7 +131,7 @@ class FolderPreloadWorker(QObject):
                         )
                         thumbnails[i] = cropped
 
-            if not self._cancelled:
+            if not self._cancelled[0]:
                 data = PreloadedFileData(
                     fps=fps,
                     dims=dims,
@@ -127,9 +140,188 @@ class FolderPreloadWorker(QObject):
                     groups=groups,
                     thumbnails=thumbnails,
                 )
-                self.file_ready.emit(path, data)
+                self.signals.file_ready.emit(self._path, data)
+        finally:
+            self.signals.finished.emit()
 
-        self.all_done.emit()
+
+class FolderPreloadWorker(QObject):
+    """Manages parallel file preloading using QThreadPool."""
+    file_ready = pyqtSignal(str, object)  # path, PreloadedFileData
+    all_done = pyqtSignal()
+
+    _POOL_SIZE = 5
+
+    def __init__(self, file_paths: list[str]):
+        super().__init__()
+        self._file_paths = file_paths
+        self._cancelled: list[bool] = [False]
+        self._pool = QThreadPool()
+        self._pool.setMaxThreadCount(self._POOL_SIZE)
+        self._total = len(file_paths)
+        self._completed = 0
+        self._tasks: list[_FilePreloadTask] = []
+
+    def start(self):
+        if not self._file_paths:
+            self.all_done.emit()
+            return
+        for path in self._file_paths:
+            task = _FilePreloadTask(path, self._cancelled)
+            task.signals.file_ready.connect(self.file_ready)
+            task.signals.finished.connect(self._on_task_finished)
+            self._tasks.append(task)
+            self._pool.start(task)
+
+    def _on_task_finished(self):
+        self._completed += 1
+        if self._completed >= self._total:
+            self.all_done.emit()
+
+    def cancel(self):
+        self._cancelled[0] = True
+        self._pool.clear()
+        self._pool.waitForDone(3000)
+
+
+class WelcomeWidget(QWidget):
+    """Start screen shown when no file is loaded."""
+
+    open_video_clicked = pyqtSignal()
+    open_folder_clicked = pyqtSignal()
+    recent_directory_clicked = pyqtSignal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setStyleSheet("background: #1e1e1e;")
+
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+        layout.addStretch(1)
+
+        title = QLabel("Sub Label Pos")
+        title.setStyleSheet("font-size: 28px; color: #ccc; font-weight: bold; background: transparent;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        subtitle = QLabel("ASS Subtitle Label Editor")
+        subtitle.setStyleSheet("font-size: 14px; color: #888; background: transparent;")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(subtitle)
+
+        layout.addSpacing(24)
+
+        header = QLabel("Recent Directories")
+        header.setStyleSheet("font-size: 13px; color: #aaa; background: transparent;")
+        header.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        header.setFixedWidth(500)
+        layout.addWidget(header, alignment=Qt.AlignmentFlag.AlignHCenter)
+        layout.addSpacing(4)
+
+        self._list = QListWidget()
+        self._list.setFixedSize(500, 350)
+        self._list.setStyleSheet("""
+            QListWidget {
+                background: #252525;
+                border: 1px solid #555;
+                border-radius: 4px;
+                outline: none;
+            }
+            QListWidget::item {
+                padding: 8px 10px;
+                border-bottom: 1px solid #333;
+            }
+            QListWidget::item:selected {
+                background: #4a9eff;
+            }
+            QListWidget::item:hover:!selected {
+                background: #333;
+            }
+        """)
+        self._list.itemDoubleClicked.connect(self._on_item_activated)
+        self._list.installEventFilter(self)
+        layout.addWidget(self._list, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        self._empty_label = QLabel("No recent directories")
+        self._empty_label.setStyleSheet("font-size: 12px; color: #666; background: transparent;")
+        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_label.setFixedWidth(500)
+        self._empty_label.hide()
+        layout.addWidget(self._empty_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        layout.addSpacing(16)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(12)
+        btn_style = """
+            QPushButton {
+                background: #3a3a3a;
+                color: #ccc;
+                border: 1px solid #555;
+                border-radius: 4px;
+                padding: 8px 24px;
+                font-size: 13px;
+            }
+            QPushButton:hover { background: #505050; }
+            QPushButton:pressed { background: #606060; }
+        """
+        btn_video = QPushButton("Open Video")
+        btn_video.setStyleSheet(btn_style)
+        btn_video.clicked.connect(self.open_video_clicked)
+        btn_row.addWidget(btn_video)
+
+        btn_folder = QPushButton("Open Folder")
+        btn_folder.setStyleSheet(btn_style)
+        btn_folder.clicked.connect(self.open_folder_clicked)
+        btn_row.addWidget(btn_folder)
+
+        layout.addLayout(btn_row)
+        layout.addStretch(1)
+
+        self._dirs: list[str] = []
+
+    def set_recent_dirs(self, dirs: list[str]) -> None:
+        self._dirs = dirs
+        self._list.clear()
+        if not dirs:
+            self._list.hide()
+            self._empty_label.show()
+            return
+        self._list.show()
+        self._empty_label.hide()
+        for d in dirs:
+            p = Path(d)
+            item = QListWidgetItem()
+            widget = QWidget()
+            widget.setStyleSheet("background: transparent;")
+            vbox = QVBoxLayout(widget)
+            vbox.setContentsMargins(0, 0, 0, 0)
+            vbox.setSpacing(2)
+            name_label = QLabel(p.name)
+            name_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #ccc; background: transparent;")
+            path_label = QLabel(str(p))
+            path_label.setStyleSheet("font-size: 11px; color: #888; background: transparent;")
+            vbox.addWidget(name_label)
+            vbox.addWidget(path_label)
+            item.setSizeHint(QSize(480, 44))
+            item.setData(Qt.ItemDataRole.UserRole, d)
+            self._list.addItem(item)
+            self._list.setItemWidget(item, widget)
+
+    def _on_item_activated(self, item: QListWidgetItem) -> None:
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if path:
+            self.recent_directory_clicked.emit(path)
+
+    def eventFilter(self, obj, event):
+        if obj is self._list and event.type() == event.Type.KeyPress:
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                item = self._list.currentItem()
+                if item:
+                    self._on_item_activated(item)
+                return True
+        return super().eventFilter(obj, event)
 
 
 class MainWindow(QMainWindow):
@@ -143,7 +335,7 @@ class MainWindow(QMainWindow):
         self._groups: list[LabelGroup] = []
         self._group_index: int = -1
         self._video_path: str | None = None
-        self._style_clipboard: tuple[int, int | None, bool | None, bool | None, str] | None = None
+        self._style_clipboard: dict | None = None
         self.__dirty: bool = False
         self._folder_files: list[str] = []
         self._folder_index: int = -1
@@ -155,7 +347,6 @@ class MainWindow(QMainWindow):
 
         # Folder pre-loading
         self._preloaded: dict[str, PreloadedFileData] = {}
-        self._preload_thread: QThread | None = None
         self._preload_worker: FolderPreloadWorker | None = None
 
         # ── Files sidebar (hidden by default) ──
@@ -206,20 +397,27 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self._gallery)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
-        self.setCentralWidget(splitter)
+
+        # Stacked widget: page 0 = welcome, page 1 = editor
+        self._welcome = WelcomeWidget()
+        self._stacked = QStackedWidget()
+        self._stacked.addWidget(self._welcome)  # index 0
+        self._stacked.addWidget(splitter)        # index 1
+        self.setCentralWidget(self._stacked)
 
         # Floating toolbar (child of player so it overlays the video)
         self._toolbar = LabelToolbar(self._player)
 
         # Main toolbar
-        tb = QToolBar("Main")
-        tb.setMovable(False)
-        self.addToolBar(tb)
-        tb.addAction("Open Video", self._open_video)
-        tb.addAction("Open Folder", self._open_folder)
-        tb.addSeparator()
-        tb.addAction("Open ASS", self._open_ass)
-        tb.addAction("Save ASS", self._save_ass)
+        self._main_tb = QToolBar("Main")
+        self._main_tb.setMovable(False)
+        self.addToolBar(self._main_tb)
+        self._main_tb.addAction("Open Video", self._open_video)
+        self._main_tb.addAction("Open Folder", self._open_folder)
+        self._main_tb.addSeparator()
+        self._main_tb.addAction("Open ASS", self._open_ass)
+        self._main_tb.addAction("Save ASS", self._save_ass)
+        self._main_tb.hide()
 
         # Shortcuts — frame stepping (arrow keys)
         QShortcut(QKeySequence(Qt.Key.Key_Right), self, lambda: self._player.step_frame(1))
@@ -242,6 +440,8 @@ class MainWindow(QMainWindow):
         # Video widget signals
         self._player.label_moved.connect(self._on_label_moved)
         self._player.label_selected.connect(self._on_label_selected)
+        self._player.label_resized.connect(self._on_label_resized)
+        self._player.label_rotated.connect(self._on_label_rotated)
         self._player.selection_cleared.connect(self._on_selection_cleared)
         self._player.edit_requested.connect(self._on_edit_requested)
         self._player.text_edited.connect(self._on_text_edited)
@@ -263,6 +463,20 @@ class MainWindow(QMainWindow):
         self._toolbar.bold_toggled.connect(self._on_bold_toggled)
         self._toolbar.italic_toggled.connect(self._on_italic_toggled)
         self._toolbar.style_changed.connect(self._on_style_changed)
+        self._toolbar.primary_colour_changed.connect(self._on_primary_colour_changed)
+        self._toolbar.outline_colour_changed.connect(self._on_outline_colour_changed)
+        self._toolbar.outline_width_changed.connect(self._on_outline_width_changed)
+        self._toolbar.apply_style_clicked.connect(self._on_apply_style)
+        self._toolbar.create_style_requested.connect(self._on_create_style)
+
+        # Welcome screen signals
+        self._welcome.open_video_clicked.connect(self._open_video)
+        self._welcome.open_folder_clicked.connect(self._open_folder)
+        self._welcome.recent_directory_clicked.connect(self._open_recent_directory)
+
+        # Settings & recent directories
+        self._settings = QSettings("SubLabelPos", "SubLabelPos")
+        self._load_recent_dirs()
 
     # ── Dirty flag property ──
 
@@ -285,6 +499,40 @@ class MainWindow(QMainWindow):
             self.setWindowTitle("Sub Label Pos [*]")
         self.setWindowModified(self.__dirty)
 
+    # ── Welcome / recent directories ──
+
+    _MAX_RECENT = 10
+
+    def _switch_to_editor(self) -> None:
+        self._stacked.setCurrentIndex(1)
+        self._main_tb.show()
+
+    def _load_recent_dirs(self) -> None:
+        dirs = self._settings.value("recent_dirs", type=list) or []
+        dirs = [d for d in dirs if Path(d).is_dir()]
+        self._welcome.set_recent_dirs(dirs)
+
+    def _add_recent_dir(self, directory: str) -> None:
+        dirs = self._settings.value("recent_dirs", type=list) or []
+        if directory in dirs:
+            dirs.remove(directory)
+        dirs.insert(0, directory)
+        dirs = dirs[:self._MAX_RECENT]
+        self._settings.setValue("recent_dirs", dirs)
+        self._welcome.set_recent_dirs(dirs)
+
+    def _open_recent_directory(self, folder: str) -> None:
+        if not Path(folder).is_dir():
+            dirs = self._settings.value("recent_dirs", type=list) or []
+            if folder in dirs:
+                dirs.remove(folder)
+                self._settings.setValue("recent_dirs", dirs)
+                self._welcome.set_recent_dirs(dirs)
+            QMessageBox.warning(self, "Not Found", f"Directory no longer exists:\n{folder}")
+            return
+        self._switch_to_editor()
+        self._open_folder_path(folder)
+
     # ── File loading ──
 
     def _open_video(self) -> None:
@@ -292,6 +540,8 @@ class MainWindow(QMainWindow):
             self, "Open Video", "", "Video Files (*.mkv *.mp4 *.avi *.webm);;All (*)"
         )
         if path:
+            self._switch_to_editor()
+            self._add_recent_dir(str(Path(path).parent))
             self._load_video(path)
 
     def _load_video(self, path: str, suppress_resize: bool = False) -> None:
@@ -358,20 +608,34 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Open Folder")
         if not folder:
             return
+        self._switch_to_editor()
+        self._open_folder_path(folder)
+
+    def _open_folder_path(self, folder: str) -> None:
         self._cancel_folder_preload()
-        def _has_ass_file(video: Path) -> bool:
-            if video.with_suffix(".ass").is_file():
-                return True
-            return bool(sorted(video.parent.glob(f"{glob.escape(video.stem)}.*.ass")))
+        def _has_labels(video: Path) -> bool:
+            exact = video.with_suffix(".ass")
+            if exact.is_file():
+                ass_path = exact
+            else:
+                candidates = sorted(video.parent.glob(f"{glob.escape(video.stem)}.*.ass"))
+                if not candidates:
+                    return False
+                ass_path = candidates[0]
+            try:
+                ass = AssFile(str(ass_path))
+                return bool(ass.labels)
+            except Exception:
+                return False
 
         files = [
             str(p) for p in Path(folder).iterdir()
             if p.is_file() and p.suffix.lower() in _VIDEO_EXTS
-            and _has_ass_file(p)
+            and _has_labels(p)
         ]
         files.sort(key=_natural_sort_key)
         if not files:
-            QMessageBox.information(self, "No Videos", "No video files with matching .ass subtitle files found in the selected folder.")
+            QMessageBox.information(self, "No Videos", "No video files with matching .ass subtitle files containing labels found in the selected folder.")
             return
         self._folder_files = files
         # Populate sidebar
@@ -385,6 +649,7 @@ class MainWindow(QMainWindow):
         self._switch_to_file(0)
         # Start pre-loading all files in background
         self._start_folder_preload(files)
+        self._add_recent_dir(folder)
 
     def _switch_to_file(self, index: int) -> None:
         if not self._folder_files:
@@ -443,13 +708,9 @@ class MainWindow(QMainWindow):
 
     def _start_folder_preload(self, file_paths: list[str]) -> None:
         self._preload_worker = FolderPreloadWorker(file_paths)
-        self._preload_thread = QThread()
-        self._preload_worker.moveToThread(self._preload_thread)
-        self._preload_thread.started.connect(self._preload_worker.run)
         self._preload_worker.file_ready.connect(self._on_file_preloaded)
         self._preload_worker.all_done.connect(self._on_preload_done)
-        self._preload_worker.all_done.connect(self._preload_thread.quit)
-        self._preload_thread.start()
+        self._preload_worker.start()
 
     def _on_file_preloaded(self, path: str, data: object) -> None:
         if not isinstance(data, PreloadedFileData):
@@ -469,11 +730,7 @@ class MainWindow(QMainWindow):
     def _cancel_folder_preload(self) -> None:
         if self._preload_worker:
             self._preload_worker.cancel()
-        if self._preload_thread and self._preload_thread.isRunning():
-            self._preload_thread.quit()
-            self._preload_thread.wait(3000)
         self._preload_worker = None
-        self._preload_thread = None
         self._preloaded.clear()
 
     def _load_video_from_cache(self, path: str, data: PreloadedFileData,
@@ -628,6 +885,8 @@ class MainWindow(QMainWindow):
                 if url.isLocalFile():
                     path = url.toLocalFile()
                     if Path(path).suffix.lower() in _VIDEO_EXTS:
+                        self._switch_to_editor()
+                        self._add_recent_dir(str(Path(path).parent))
                         self._load_video(path)
                         event.acceptProposedAction()
                         return
@@ -642,12 +901,24 @@ class MainWindow(QMainWindow):
             _status_msg(self, f"Moved \"{label.text}\" to ({new_x}, {new_y})")
         self._update_toolbar_position()
 
+    def _on_label_resized(self, label, new_fs):
+        self._dirty = True
+        self._toolbar._font_size = new_fs
+        self._toolbar._size_label.setText(str(new_fs))
+
+    def _on_label_rotated(self, label, rotation):
+        self._dirty = True
+
     def _on_label_selected(self, label: LabelDialogue) -> None:
         selected = self._player.selected_labels()
         multi = len(selected) > 1
-        font_size = label.font_size if label.font_size is not None else (
-            self._ass.label_font_size if self._ass else 36
-        )
+        if label.font_size is not None:
+            font_size = label.font_size
+        elif self._ass:
+            style = self._ass.styles.get(label.style_name)
+            font_size = style.font_size if style else self._ass.label_font_size
+        else:
+            font_size = 36
         if multi:
             alignments = {lb.alignment for lb in selected}
             effective_alignment = alignments.pop() if len(alignments) == 1 else None
@@ -665,6 +936,23 @@ class MainWindow(QMainWindow):
         bold = label.bold if label.bold is not None else default_bold
         italic = label.italic if label.italic is not None else default_italic
 
+        # Determine colour/outline state
+        if self._ass:
+            style = self._ass.styles.get(label.style_name)
+            primary_colour = label.primary_colour if label.primary_colour is not None else (
+                style.primary_colour if style else "&H00FFFFFF&"
+            )
+            outline_colour = label.outline_colour if label.outline_colour is not None else (
+                style.outline_colour if style else "&H00000000&"
+            )
+            outline_width = label.outline_width if label.outline_width is not None else (
+                style.outline_width if style else 2.0
+            )
+        else:
+            primary_colour = "&H00FFFFFF&"
+            outline_colour = "&H00000000&"
+            outline_width = 2.0
+
         available_styles = list(self._ass.styles.keys()) if self._ass else []
 
         self._toolbar.set_multi_mode(multi)
@@ -673,6 +961,9 @@ class MainWindow(QMainWindow):
             bold=bold, italic=italic,
             style_name=label.style_name,
             available_styles=available_styles,
+            primary_colour=primary_colour,
+            outline_colour=outline_colour,
+            outline_width=outline_width,
         )
         self._update_toolbar_position()
 
@@ -709,6 +1000,17 @@ class MainWindow(QMainWindow):
         self._player.show_time(self._player._current_time)
         self._dirty = True
         _status_msg(self, f"Duplicated \"{label.text}\"")
+
+    def _on_sync_times(self, labels: list) -> None:
+        if not self._ass or len(labels) < 2:
+            return
+        start = min(lb.start_time for lb in labels)
+        end = max(lb.end_time for lb in labels)
+        for lb in labels:
+            self._ass.set_label_times(lb, start, end)
+        self._dirty = True
+        self._player.show_time(self._player._current_time)
+        _status_msg(self, f"Synced {len(labels)} labels to {_seconds_to_time(start)} \u2192 {_seconds_to_time(end)}")
 
     def _on_delete(self) -> None:
         if not self._ass:
@@ -790,29 +1092,70 @@ class MainWindow(QMainWindow):
         self._player.update()
         self._update_toolbar_position()
 
-    def _on_copy_style(self) -> None:
+    def _on_copy_style(self, selected_attrs: set | None = None) -> None:
         selected = self._player.selected_labels()
         if not selected:
             return
+        if selected_attrs is None:
+            selected_attrs = {"font_size", "alignment", "bold", "italic", "style",
+                              "primary_colour", "outline_colour", "outline_width", "rotation",
+                              "position"}
         label = selected[0]
-        font_size = label.font_size if label.font_size is not None else (
-            self._ass.label_font_size if self._ass else 36
-        )
-        self._style_clipboard = (font_size, label.alignment, label.bold, label.italic, label.style_name)
-        _status_msg(self, f"Copied style (font size: {font_size}, alignment: {label.alignment}, style: {label.style_name})")
+        if label.font_size is not None:
+            font_size = label.font_size
+        elif self._ass:
+            style = self._ass.styles.get(label.style_name)
+            font_size = style.font_size if style else self._ass.label_font_size
+        else:
+            font_size = 36
+        self._style_clipboard = {
+            "font_size": font_size if "font_size" in selected_attrs else None,
+            "alignment": label.alignment if "alignment" in selected_attrs else None,
+            "bold": label.bold if "bold" in selected_attrs else None,
+            "italic": label.italic if "italic" in selected_attrs else None,
+            "style": label.style_name if "style" in selected_attrs else None,
+            "primary_colour": label.primary_colour if "primary_colour" in selected_attrs else None,
+            "outline_colour": label.outline_colour if "outline_colour" in selected_attrs else None,
+            "outline_width": label.outline_width if "outline_width" in selected_attrs else None,
+            "rotation": label.rotation if "rotation" in selected_attrs else None,
+            "position": (label.pos_x, label.pos_y) if "position" in selected_attrs else None,
+        }
+        copied = [k for k in selected_attrs if self._style_clipboard.get(k) is not None]
+        _status_msg(self, f"Copied: {', '.join(copied) if copied else 'nothing'}")
 
     def _on_paste_style(self) -> None:
         if not self._ass or self._style_clipboard is None:
             return
-        font_size, alignment, bold, italic, style_name = self._style_clipboard
+        clip = self._style_clipboard
+        font_size = clip["font_size"]
+        alignment = clip["alignment"]
+        bold = clip["bold"]
+        italic = clip["italic"]
+        style_name = clip["style"]
+        primary_colour = clip["primary_colour"]
+        outline_colour = clip["outline_colour"]
+        outline_width = clip["outline_width"]
+        rotation = clip["rotation"]
+        position = clip["position"]
         for label in self._player.selected_labels():
-            self._ass.set_label_font_size(label, font_size)
             if bold is not None:
                 self._ass.set_label_bold(label, bold)
             if italic is not None:
                 self._ass.set_label_italic(label, italic)
+            if primary_colour is not None:
+                self._ass.set_label_primary_colour(label, primary_colour)
+            if outline_colour is not None:
+                self._ass.set_label_outline_colour(label, outline_colour)
+            if outline_width is not None:
+                self._ass.set_label_outline_width(label, outline_width)
+            if rotation is not None:
+                self._ass.set_label_rotation(label, rotation)
             if style_name and style_name in self._ass.styles:
                 self._ass.set_label_style(label, style_name)
+            if font_size is not None:
+                self._ass.set_label_font_size(label, font_size)
+            if position is not None:
+                self._ass.set_label_position(label, position[0], position[1])
             if alignment is not None:
                 font = self._player._font_for_label(label)
                 rect = self._player._compute_rect(label, font)
@@ -823,18 +1166,9 @@ class MainWindow(QMainWindow):
         self._dirty = True
         self._player._font_corrections.clear()
         self._player.update()
-        # Determine effective bold/italic for toolbar display
-        eff_bold = bold if bold is not None else False
-        eff_italic = italic if italic is not None else False
-        available_styles = list(self._ass.styles.keys())
-        self._toolbar.show_for_label(
-            font_size, alignment,
-            bold=eff_bold, italic=eff_italic,
-            style_name=style_name or "Label",
-            available_styles=available_styles,
-        )
-        self._update_toolbar_position()
-        _status_msg(self, f"Pasted style (font size: {font_size}, alignment: {alignment}, style: {style_name})")
+        self._refresh_toolbar_for_selection()
+        pasted = [k for k, v in clip.items() if v is not None]
+        _status_msg(self, f"Pasted: {', '.join(pasted) if pasted else 'nothing'}")
 
     def _on_bold_toggled(self, bold: bool) -> None:
         if not self._ass:
@@ -862,7 +1196,149 @@ class MainWindow(QMainWindow):
         self._dirty = True
         self._player._font_corrections.clear()
         self._player.update()
-        self._update_toolbar_position()
+        self._refresh_toolbar_for_selection()
+
+    def _on_primary_colour_changed(self, colour: str) -> None:
+        if not self._ass:
+            return
+        for label in self._player.selected_labels():
+            self._ass.set_label_primary_colour(label, colour)
+        self._dirty = True
+        self._player.update()
+
+    def _on_outline_colour_changed(self, colour: str) -> None:
+        if not self._ass:
+            return
+        for label in self._player.selected_labels():
+            self._ass.set_label_outline_colour(label, colour)
+        self._dirty = True
+        self._player.update()
+
+    def _on_outline_width_changed(self, width: float) -> None:
+        if not self._ass:
+            return
+        for label in self._player.selected_labels():
+            self._ass.set_label_outline_width(label, width)
+        self._dirty = True
+        self._player.update()
+
+    def _on_create_style(self, name: str) -> None:
+        if not self._ass:
+            return
+        if name in self._ass.styles:
+            QMessageBox.warning(self, "Duplicate Style", f"A style named '{name}' already exists.")
+            return
+        selected = self._player.selected_labels()
+        # Get template from current label's style
+        template = None
+        if selected:
+            template = self._ass.styles.get(selected[0].style_name)
+        elif self._ass.styles:
+            template = next(iter(self._ass.styles.values()))
+        new_style = self._ass.add_style(name, template)
+        # Apply label's inline overrides into the new style
+        if selected:
+            label = selected[0]
+            if label.font_size is not None:
+                self._ass.update_style_field(name, 2, str(label.font_size))
+            if label.bold is not None:
+                self._ass.update_style_field(name, 7, "1" if label.bold else "0")
+            if label.italic is not None:
+                self._ass.update_style_field(name, 8, "1" if label.italic else "0")
+            if label.alignment is not None:
+                self._ass.update_style_field(name, 18, str(label.alignment))
+            if label.primary_colour is not None:
+                self._ass.update_style_field(name, 3, label.primary_colour)
+            if label.outline_colour is not None:
+                self._ass.update_style_field(name, 5, label.outline_colour)
+            if label.outline_width is not None:
+                self._ass.update_style_field(name, 16, f"{label.outline_width:g}")
+            # Remove inline tags that were promoted
+            for tag_re, attr in [
+                (_FS_TAG_RE, "font_size"), (_AN_TAG_RE, "alignment"),
+                (_B_TAG_RE, "bold"), (_I_TAG_RE, "italic"),
+                (_C_TAG_RE, "primary_colour"), (_3C_TAG_RE, "outline_colour"),
+                (_BORD_TAG_RE, "outline_width"),
+            ]:
+                if getattr(label, attr) is not None:
+                    self._ass.remove_inline_tag(label, tag_re, attr)
+            # Assign label to the new style
+            self._ass.set_label_style(label, name)
+        self._dirty = True
+        self._player.update()
+        self._refresh_toolbar_for_selection()
+        _status_msg(self, f"Created style '{name}'")
+
+    def _on_apply_style(self) -> None:
+        if not self._ass:
+            return
+        selected = self._player.selected_labels()
+        if not selected:
+            return
+        label = selected[0]
+        style_name = label.style_name
+
+        # Build list of properties that have inline overrides
+        props = [
+            ("Font Size", _FS_TAG_RE, "font_size", 2, label.font_size),
+            ("Primary Colour", _C_TAG_RE, "primary_colour", 3, label.primary_colour),
+            ("Outline Colour", _3C_TAG_RE, "outline_colour", 5, label.outline_colour),
+            ("Bold", _B_TAG_RE, "bold", 7, label.bold),
+            ("Italic", _I_TAG_RE, "italic", 8, label.italic),
+            ("Outline Width", _BORD_TAG_RE, "outline_width", 16, label.outline_width),
+            ("Alignment", _AN_TAG_RE, "alignment", 18, label.alignment),
+        ]
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Apply to Style")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(f"Promote inline overrides to style '{style_name}':"))
+
+        checkboxes: list[tuple[QCheckBox, str, object, int, str]] = []
+        for display_name, tag_re, attr, field_idx, value in props:
+            cb = QCheckBox(display_name)
+            has_override = value is not None
+            cb.setEnabled(has_override)
+            cb.setChecked(has_override)
+            layout.addWidget(cb)
+            checkboxes.append((cb, attr, tag_re, field_idx, attr))
+
+        btn_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btn_box.accepted.connect(dialog.accept)
+        btn_box.rejected.connect(dialog.reject)
+        layout.addWidget(btn_box)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        for cb, attr, tag_re, field_idx, attr_name in checkboxes:
+            if not cb.isChecked():
+                continue
+            value = getattr(label, attr)
+            if value is None:
+                continue
+            # Convert value to string for style field
+            if isinstance(value, bool):
+                field_value = "1" if value else "0"
+            elif isinstance(value, float):
+                field_value = f"{value:g}"
+            else:
+                field_value = str(value)
+            self._ass.update_style_field(style_name, field_idx, field_value)
+            self._ass.remove_inline_tag_from_all(style_name, tag_re, attr_name)
+
+        self._dirty = True
+        self._player.update()
+        self._refresh_toolbar_for_selection()
+        _status_msg(self, f"Applied overrides to style '{style_name}'")
+
+    def _refresh_toolbar_for_selection(self) -> None:
+        """Re-read the selected label state and update the toolbar."""
+        selected = self._player.selected_labels()
+        if selected:
+            self._on_label_selected(selected[0])
 
     def _on_bold_shortcut(self) -> None:
         # If inline editor is active, let QTextEdit handle Ctrl+B
@@ -950,12 +1426,15 @@ class MainWindow(QMainWindow):
         menu.addAction("Delete", self._on_delete)
         menu.addSeparator()
 
+        if len(selected) >= 2:
+            menu.addAction("Sync Times", lambda: self._on_sync_times(selected))
+
         if 2 <= len(selected) <= 3:
             self._build_merge_submenu(menu, selected)
 
         if len(selected) == 1:
             menu.addAction("Edit Text", lambda: self._on_edit_requested(selected[0]))
-            menu.addAction("Copy Style", self._on_copy_style)
+            menu.addAction("Copy Style", lambda: self._on_copy_style())
         if self._style_clipboard is not None:
             menu.addAction("Paste Style", self._on_paste_style)
 
