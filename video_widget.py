@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
+import math
 import struct
 import subprocess
 from collections import OrderedDict
+from enum import Enum
 
 from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal, QObject, QThread
 from PyQt6.QtGui import (
     QPainter, QFont, QColor, QPen, QFontMetricsF, QCursor, QPixmap, QImage,
-    QRawFont,
+    QRawFont, QPainterPath,
 )
 from PyQt6.QtWidgets import QWidget, QTextEdit
 
@@ -16,6 +18,7 @@ from ass_parser import (
     AssFile, LabelDialogue, _seconds_to_time,
     parse_rich_text, segments_to_html, html_to_segments, segments_to_ass,
 )
+from label_toolbar import ass_colour_to_qcolor
 
 
 def _libass_font_correction(font: QFont) -> float:
@@ -37,7 +40,29 @@ def _libass_font_correction(font: QFont) -> float:
     return upm / cell if cell > 0 else 1.0
 
 _CACHE_MAX = 50
+_MAX_FRAME_W = 1920
+_MAX_FRAME_H = 1080
+_JPEG_QUALITY = 5  # ffmpeg MJPEG scale (2=best, 31=worst), ~90% JPEG quality
 _DRAG_THRESHOLD = 4  # pixels before press becomes drag
+_HANDLE_SIZE = 8        # px, side length of corner resize squares
+_HANDLE_HIT_RADIUS = 10  # px, hit test tolerance for handles
+_ROTATE_OFFSET = 16     # px, distance of rotation handle from corner
+_MIN_FONT_SIZE = 6
+
+
+class _DragMode(Enum):
+    NONE = 0
+    MOVE = 1
+    RESIZE = 2
+    ROTATE = 3
+
+
+def _rotate_point(p: QPointF, center: QPointF, angle_deg: float) -> QPointF:
+    rad = math.radians(angle_deg)
+    dx, dy = p.x() - center.x(), p.y() - center.y()
+    rx = dx * math.cos(rad) - dy * math.sin(rad)
+    ry = dx * math.sin(rad) + dy * math.cos(rad)
+    return QPointF(center.x() + rx, center.y() + ry)
 
 
 def detect_fps(video_path: str) -> float:
@@ -67,8 +92,10 @@ def extract_frame(video_path: str, seconds: float) -> QPixmap | None:
         "-ss", f"{seconds:.3f}",
         "-i", video_path,
         "-frames:v", "1",
+        "-vf", f"scale='min({_MAX_FRAME_W},iw)':'min({_MAX_FRAME_H},ih)':force_original_aspect_ratio=decrease",
         "-f", "image2pipe",
-        "-vcodec", "png",
+        "-vcodec", "mjpeg",
+        "-q:v", str(_JPEG_QUALITY),
         "pipe:1",
     ]
     try:
@@ -90,8 +117,10 @@ def extract_frame_as_image(video_path: str, seconds: float) -> QImage | None:
         "-ss", f"{seconds:.3f}",
         "-i", video_path,
         "-frames:v", "1",
+        "-vf", f"scale='min({_MAX_FRAME_W},iw)':'min({_MAX_FRAME_H},ih)':force_original_aspect_ratio=decrease",
         "-f", "image2pipe",
-        "-vcodec", "png",
+        "-vcodec", "mjpeg",
+        "-q:v", str(_JPEG_QUALITY),
         "pipe:1",
     ]
     try:
@@ -169,6 +198,8 @@ class VideoFrameWidget(QWidget):
 
     label_moved = pyqtSignal(LabelDialogue, int, int)  # label, new_x, new_y
     label_selected = pyqtSignal(LabelDialogue)
+    label_resized = pyqtSignal(object, int)    # label, new_font_size
+    label_rotated = pyqtSignal(object, float)  # label, new_rotation_degrees
     edit_requested = pyqtSignal(LabelDialogue)
     text_edited = pyqtSignal(LabelDialogue, str)
     editing_cancelled = pyqtSignal()
@@ -212,9 +243,18 @@ class VideoFrameWidget(QWidget):
         self._drag_started: bool = False
 
         # Drag state (single or multi)
+        self._drag_mode: _DragMode = _DragMode.NONE
         self._dragging: LabelDialogue | None = None
         self._drag_offset = QPointF()
         self._multi_drag_initial: dict[int, tuple[int, int]] = {}  # line_index -> (pos_x, pos_y)
+
+        # Resize/rotate handle state
+        self._resize_corner: int = -1       # 0=TL, 1=TR, 2=BR, 3=BL
+        self._resize_initial_fs: int = 0
+        self._resize_initial_dist: float = 0.0
+        self._rotate_initial_angle: float = 0.0
+        self._rotate_initial_frz: float = 0.0
+        self._handle_label: LabelDialogue | None = None
 
         # Snap guides
         self._snap_lines: list[tuple[QPointF, QPointF]] = []
@@ -483,6 +523,98 @@ class VideoFrameWidget(QWidget):
 
         return QPointF(ax, ay)
 
+    # ── Handle geometry ──
+
+    def _get_handle_positions(self, rect: QRectF, anchor: QPointF, rotation: float):
+        """Return (resize_positions, rotate_positions) as lists of 4 QPointFs each."""
+        corners = [rect.topLeft(), rect.topRight(), rect.bottomRight(), rect.bottomLeft()]
+        # Direction vectors pointing outward from center for each corner
+        diag_dirs = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
+
+        resize_pts = []
+        rotate_pts = []
+        for i, corner in enumerate(corners):
+            rc = _rotate_point(corner, anchor, -rotation) if rotation != 0 else corner
+            resize_pts.append(rc)
+            dx, dy = diag_dirs[i]
+            norm = math.sqrt(2)
+            offset = QPointF(dx / norm * _ROTATE_OFFSET, dy / norm * _ROTATE_OFFSET)
+            rotate_pts.append(QPointF(rc.x() + offset.x(), rc.y() + offset.y()))
+        return resize_pts, rotate_pts
+
+    def _draw_handles(self, painter: QPainter, rect: QRectF, anchor: QPointF, rotation: float):
+        hs = _HANDLE_SIZE
+        resize_pts, rotate_pts = self._get_handle_positions(rect, anchor, rotation)
+
+        # Resize handles — white filled squares
+        painter.setPen(QPen(QColor(74, 158, 255), 1.0))
+        for pt in resize_pts:
+            handle_rect = QRectF(pt.x() - hs / 2, pt.y() - hs / 2, hs, hs)
+            painter.fillRect(handle_rect, QColor(255, 255, 255))
+            painter.drawRect(handle_rect)
+
+        # Rotation handles — small curved arrows
+        for pt in rotate_pts:
+            self._draw_rotation_handle(painter, pt)
+
+    def _draw_rotation_handle(self, painter: QPainter, center: QPointF, size: float = 5.0):
+        r = size
+        arc_rect = QRectF(center.x() - r, center.y() - r, 2 * r, 2 * r)
+        path = QPainterPath()
+        path.arcMoveTo(arc_rect, 45)
+        path.arcTo(arc_rect, 45, 270)
+        end = path.currentPosition()
+
+        painter.setPen(QPen(QColor(255, 255, 255), 1.5))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+
+        # Small arrowhead at the end of the arc
+        arrow_len = 3.0
+        # The arc ends at 45+270 = 315 degrees, tangent points inward
+        angle_rad = math.radians(315)
+        tangent_angle = angle_rad + math.pi / 2  # perpendicular to radius
+        a1 = tangent_angle + math.radians(30)
+        a2 = tangent_angle - math.radians(30)
+        painter.drawLine(end, QPointF(end.x() + arrow_len * math.cos(a1),
+                                       end.y() - arrow_len * math.sin(a1)))
+        painter.drawLine(end, QPointF(end.x() + arrow_len * math.cos(a2),
+                                       end.y() - arrow_len * math.sin(a2)))
+
+    def _hit_test_handles(self, pos: QPointF) -> tuple[_DragMode, int, LabelDialogue] | None:
+        """Check if pos hits a resize or rotation handle. Single-select only."""
+        if len(self._selected) != 1:
+            return None
+        label = None
+        for lb in self._visible_labels:
+            if lb.line_index in self._selected:
+                label = lb
+                break
+        if label is None:
+            return None
+
+        rect = self._label_rects.get(label.line_index)
+        if rect is None:
+            return None
+
+        rotation = label.rotation if label.rotation is not None else 0.0
+        anchor = self._anchor_from_rect(rect, label)
+        resize_pts, rotate_pts = self._get_handle_positions(rect, anchor, rotation)
+
+        # Check resize handles first (higher priority, closer to label)
+        for i, pt in enumerate(resize_pts):
+            dist = math.hypot(pos.x() - pt.x(), pos.y() - pt.y())
+            if dist < _HANDLE_HIT_RADIUS:
+                return (_DragMode.RESIZE, i, label)
+
+        # Check rotation handles
+        for i, pt in enumerate(rotate_pts):
+            dist = math.hypot(pos.x() - pt.x(), pos.y() - pt.y())
+            if dist < _HANDLE_HIT_RADIUS:
+                return (_DragMode.ROTATE, i, label)
+
+        return None
+
     # ── Selection helpers ──
 
     def selected_labels(self) -> list[LabelDialogue]:
@@ -518,6 +650,15 @@ class VideoFrameWidget(QWidget):
                 rect = self._compute_rect(label, font)
                 self._label_rects[label.line_index] = rect
 
+                rotation = label.rotation if label.rotation is not None else 0.0
+                anchor = self._anchor_from_rect(rect, label)
+
+                if rotation != 0:
+                    painter.save()
+                    painter.translate(anchor)
+                    painter.rotate(-rotation)  # ASS is counterclockwise, Qt is clockwise
+                    painter.translate(-anchor)
+
                 painter.fillRect(rect, QColor(0, 0, 0, 140))
 
                 is_selected = label.line_index in self._selected
@@ -526,10 +667,25 @@ class VideoFrameWidget(QWidget):
                 else:
                     pen = QPen(QColor(255, 255, 255, 180), 1.5, Qt.PenStyle.DashLine)
                 painter.setPen(pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawRect(rect)
 
-                painter.setPen(QColor(255, 255, 255))
                 text_rect = rect.adjusted(6, 4, -6, -4)
+
+                # Resolve colours and outline for this label
+                style = self._ass.styles.get(label.style_name) if self._ass else None
+                text_colour = ass_colour_to_qcolor(
+                    label.primary_colour if label.primary_colour is not None else
+                    (style.primary_colour if style else "&H00FFFFFF&")
+                )
+                outline_colour = ass_colour_to_qcolor(
+                    label.outline_colour if label.outline_colour is not None else
+                    (style.outline_colour if style else "&H00000000&")
+                )
+                outline_width = (
+                    label.outline_width if label.outline_width is not None else
+                    (style.outline_width if style else 2.0)
+                )
 
                 # Segment-aware multi-line rendering
                 font_name, base_size, default_bold, default_italic = self._style_for_label(label)
@@ -574,11 +730,29 @@ class VideoFrameWidget(QWidget):
                     for seg in seg_line:
                         seg_font = self._font_for_label(label, bold_override=seg.bold, italic_override=seg.italic)
                         seg_fm = QFontMetricsF(seg_font)
-                        painter.setFont(seg_font)
-                        painter.setPen(QColor(255, 255, 255))
-                        seg_rect = QRectF(x_offset, y_pos, seg_fm.horizontalAdvance(seg.text), max_line_h)
-                        painter.drawText(seg_rect, Qt.AlignmentFlag.AlignVCenter, seg.text)
-                        x_offset += seg_fm.horizontalAdvance(seg.text)
+                        seg_w = seg_fm.horizontalAdvance(seg.text)
+                        baseline_y = y_pos + (max_line_h + seg_fm.ascent() - seg_fm.descent()) / 2
+
+                        path = QPainterPath()
+                        path.addText(x_offset, baseline_y, seg_font, seg.text)
+
+                        if outline_width > 0:
+                            painter.setPen(QPen(outline_colour, outline_width * 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                            painter.setBrush(Qt.BrushStyle.NoBrush)
+                            painter.drawPath(path)
+
+                        painter.setPen(Qt.PenStyle.NoPen)
+                        painter.setBrush(text_colour)
+                        painter.drawPath(path)
+
+                        x_offset += seg_w
+
+                if rotation != 0:
+                    painter.restore()
+
+                # Draw resize/rotate handles for single selection
+                if is_selected and len(self._selected) == 1:
+                    self._draw_handles(painter, rect, anchor, rotation)
 
         # Draw hovered label timestamp
         if self._hovered_label is not None:
@@ -618,15 +792,53 @@ class VideoFrameWidget(QWidget):
     def _hit_test(self, pos: QPointF) -> LabelDialogue | None:
         for label in reversed(self._visible_labels):
             rect = self._label_rects.get(label.line_index)
-            if rect and rect.contains(pos):
+            if not rect:
+                continue
+            rotation = label.rotation if label.rotation is not None else 0.0
+            if rotation != 0:
+                # Rotate the test point into the label's local (unrotated) space
+                anchor = self._anchor_from_rect(rect, label)
+                local_pos = _rotate_point(pos, anchor, rotation)
+                if rect.contains(local_pos):
+                    return label
+            elif rect.contains(pos):
                 return label
         return None
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self._press_pos = event.position()
-            self._press_label = self._hit_test(event.position())
+            pos = event.position()
+            # Check handles first (resize/rotate)
+            handle_hit = self._hit_test_handles(pos)
+            if handle_hit:
+                mode, corner, label = handle_hit
+                self._drag_mode = mode
+                self._handle_label = label
+                self._resize_corner = corner
+                self._drag_started = True
+                self._press_pos = pos
+
+                rect = self._label_rects.get(label.line_index)
+                if rect:
+                    anchor = self._anchor_from_rect(rect, label)
+                    if mode == _DragMode.RESIZE:
+                        font_name, base_size, bold, italic = self._style_for_label(label)
+                        self._resize_initial_fs = label.font_size if label.font_size is not None else base_size
+                        self._resize_initial_dist = math.hypot(
+                            pos.x() - anchor.x(), pos.y() - anchor.y()
+                        )
+                    elif mode == _DragMode.ROTATE:
+                        self._rotate_initial_angle = math.atan2(
+                            pos.y() - anchor.y(), pos.x() - anchor.x()
+                        )
+                        self._rotate_initial_frz = label.rotation if label.rotation is not None else 0.0
+                event.accept()
+                return
+
+            self._press_pos = pos
+            self._press_label = self._hit_test(pos)
             self._drag_started = False
+            self._drag_mode = _DragMode.NONE
             event.accept()
             return
         if event.button() == Qt.MouseButton.RightButton:
@@ -645,34 +857,63 @@ class VideoFrameWidget(QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        # Active drag in progress
-        if self._drag_started and self._dragging:
-            self._do_drag_move(event.position())
+        pos = event.position()
+
+        # Active resize drag
+        if self._drag_started and self._drag_mode == _DragMode.RESIZE:
+            self._do_resize_move(pos)
             event.accept()
             return
 
-        # Check if we should start a drag
-        if self._press_pos is not None and self._press_label is not None:
-            delta = event.position() - self._press_pos
+        # Active rotate drag
+        if self._drag_started and self._drag_mode == _DragMode.ROTATE:
+            self._do_rotate_move(pos)
+            event.accept()
+            return
+
+        # Active move drag in progress
+        if self._drag_started and self._dragging:
+            self._do_drag_move(pos)
+            event.accept()
+            return
+
+        # Check if we should start a move drag
+        if self._press_pos is not None and self._press_label is not None and self._drag_mode == _DragMode.NONE:
+            delta = pos - self._press_pos
             if (delta.x() ** 2 + delta.y() ** 2) ** 0.5 > _DRAG_THRESHOLD:
-                self._start_drag(event.position())
+                self._start_drag(pos)
                 event.accept()
                 return
 
         # Hover cursor
-        label = self._hit_test(event.position())
-        if label:
-            self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+        handle_hit = self._hit_test_handles(pos)
+        if handle_hit:
+            mode, corner, _ = handle_hit
+            if mode == _DragMode.RESIZE:
+                if corner in (0, 2):  # TL, BR
+                    self.setCursor(QCursor(Qt.CursorShape.SizeFDiagCursor))
+                else:  # TR, BL
+                    self.setCursor(QCursor(Qt.CursorShape.SizeBDiagCursor))
+            else:
+                self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
         else:
-            self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
-        if label is not self._hovered_label:
-            self._hovered_label = label
-            self.update()
+            label = self._hit_test(pos)
+            if label:
+                self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+            else:
+                self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            if label is not self._hovered_label:
+                self._hovered_label = label
+                self.update()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            if self._drag_started and self._dragging:
+            if self._drag_started and self._drag_mode == _DragMode.RESIZE:
+                self._finish_resize()
+            elif self._drag_started and self._drag_mode == _DragMode.ROTATE:
+                self._finish_rotate()
+            elif self._drag_started and self._dragging:
                 # Finish drag — emit label_moved for all selected
                 self._finish_drag()
             elif self._press_pos is not None:
@@ -681,6 +922,8 @@ class VideoFrameWidget(QWidget):
             self._press_pos = None
             self._press_label = None
             self._drag_started = False
+            self._drag_mode = _DragMode.NONE
+            self._handle_label = None
             self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
             event.accept()
             return
@@ -738,6 +981,7 @@ class VideoFrameWidget(QWidget):
             return
 
         self._drag_started = True
+        self._drag_mode = _DragMode.MOVE
         self._dragging = label
         self._hovered_label = None
 
@@ -837,6 +1081,55 @@ class VideoFrameWidget(QWidget):
         self._dragging = None
         self._snap_lines.clear()
         self._multi_drag_initial.clear()
+        self.update()
+
+    # ── Resize / Rotate drag ──
+
+    def _do_resize_move(self, pos: QPointF):
+        label = self._handle_label
+        if not label:
+            return
+        rect = self._label_rects.get(label.line_index)
+        if not rect:
+            return
+        anchor = self._anchor_from_rect(rect, label)
+        current_dist = math.hypot(pos.x() - anchor.x(), pos.y() - anchor.y())
+        if self._resize_initial_dist < 1:
+            return
+        scale = current_dist / self._resize_initial_dist
+        new_fs = max(_MIN_FONT_SIZE, round(self._resize_initial_fs * scale))
+        if self._ass:
+            self._ass.set_label_font_size(label, new_fs)
+        self.label_resized.emit(label, new_fs)
+        self.update()
+
+    def _finish_resize(self):
+        self._handle_label = None
+        self.update()
+
+    def _do_rotate_move(self, pos: QPointF):
+        label = self._handle_label
+        if not label:
+            return
+        rect = self._label_rects.get(label.line_index)
+        if not rect:
+            return
+        anchor = self._anchor_from_rect(rect, label)
+        current_angle = math.atan2(pos.y() - anchor.y(), pos.x() - anchor.x())
+        delta = math.degrees(self._rotate_initial_angle - current_angle)
+        new_rotation = self._rotate_initial_frz + delta
+        # Normalize to -180..180
+        new_rotation = ((new_rotation + 180) % 360) - 180
+        label.rotation = new_rotation
+        self.update()
+
+    def _finish_rotate(self):
+        label = self._handle_label
+        if label and self._ass:
+            rotation = label.rotation if label.rotation is not None else 0.0
+            self._ass.set_label_rotation(label, rotation)
+            self.label_rotated.emit(label, rotation)
+        self._handle_label = None
         self.update()
 
     # ── Inline text editing ──
