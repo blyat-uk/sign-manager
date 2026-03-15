@@ -152,9 +152,26 @@ def _get_video_dimensions(path: str) -> tuple[int, int] | None:
     return None
 
 
+def detect_duration(video_path: str) -> float:
+    """Return video duration in seconds via ffprobe, defaulting to 0.0 on failure."""
+    cmd = [
+        "ffprobe", "-v", "quiet",
+        "-show_entries", "format=duration",
+        "-of", "csv=p=0",
+        video_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        pass
+    return 0.0
+
+
 class VideoSetupWorker(QObject):
-    """Runs detect_fps, _get_video_dimensions, and extract_frame_as_image off the main thread."""
-    finished = pyqtSignal(float, object, object)  # fps, dims, QImage
+    """Runs detect_fps, _get_video_dimensions, detect_duration, and extract_frame_as_image off the main thread."""
+    finished = pyqtSignal(float, object, object, float)  # fps, dims, QImage, duration
 
     def __init__(self, path: str):
         super().__init__()
@@ -163,8 +180,9 @@ class VideoSetupWorker(QObject):
     def run(self):
         fps = detect_fps(self._path)
         dims = _get_video_dimensions(self._path)
+        duration = detect_duration(self._path)
         frame = extract_frame_as_image(self._path, 0)
-        self.finished.emit(fps, dims, frame)
+        self.finished.emit(fps, dims, frame, duration)
 
 
 class FramePrefetchWorker(QObject):

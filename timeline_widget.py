@@ -18,6 +18,7 @@ class _TrackWidget(QWidget):
     """Custom painted slider track with label group markers."""
 
     seeked = pyqtSignal(float)  # emitted with seconds when user clicks/drags
+    group_clicked = pyqtSignal(int)  # emitted with group index when a marker is clicked
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -92,10 +93,25 @@ class _TrackWidget(QWidget):
 
         p.end()
 
+    def _hit_group(self, x: float) -> int:
+        """Return the group index if x is within a marker, or -1."""
+        for i, (start, end) in enumerate(self._group_ranges):
+            x1 = self._time_to_x(start)
+            x2 = self._time_to_x(end)
+            w = max(x2 - x1, 3)
+            if x1 <= x <= x1 + w:
+                return i
+        return -1
+
     def mousePressEvent(self, event) -> None:
         if event and event.button() == Qt.MouseButton.LeftButton:
+            x = event.position().x()
+            gi = self._hit_group(x)
+            if gi >= 0:
+                self.group_clicked.emit(gi)
+                return
             self._dragging = True
-            t = self._x_to_time(event.position().x())
+            t = self._x_to_time(x)
             self._position = t
             self.update()
             self.seeked.emit(t)
@@ -124,6 +140,7 @@ class TimelineWidget(QWidget):
     time_seeked = pyqtSignal(float)
     play_toggled = pyqtSignal(bool)
     step_requested = pyqtSignal(int)
+    group_clicked = pyqtSignal(int)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -188,6 +205,7 @@ class TimelineWidget(QWidget):
         # Track (scrubber)
         self._track = _TrackWidget()
         self._track.seeked.connect(self._on_track_seeked)
+        self._track.group_clicked.connect(self.group_clicked)
 
         # Layout
         layout = QVBoxLayout(self)

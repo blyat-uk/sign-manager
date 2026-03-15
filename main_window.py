@@ -34,7 +34,7 @@ from ass_parser import (
     _FS_TAG_RE, _AN_TAG_RE, _B_TAG_RE, _I_TAG_RE,
     _C_TAG_RE, _3C_TAG_RE, _BORD_TAG_RE,
 )
-from video_widget import VideoFrameWidget, VideoSetupWorker, detect_fps, _get_video_dimensions, extract_frame_as_image
+from video_widget import VideoFrameWidget, VideoSetupWorker, detect_fps, detect_duration, _get_video_dimensions, extract_frame_as_image
 from gallery_widget import GalleryPanel, LabelGroup, compute_label_groups, _crop_to_labels_image, _best_representative_time
 from label_toolbar import LabelToolbar
 from mpv_preview import MpvPreviewWidget
@@ -70,6 +70,7 @@ class PreloadedFileData:
     initial_frame: QImage | None
     ass: AssFile | None
     groups: list[LabelGroup]
+    duration: float = 0.0
     thumbnails: dict[int, QImage] = field(default_factory=dict)
 
 
@@ -97,6 +98,9 @@ class _FilePreloadTask(QRunnable):
             if self._cancelled[0]:
                 return
             dims = _get_video_dimensions(self._path)
+            if self._cancelled[0]:
+                return
+            duration = detect_duration(self._path)
             if self._cancelled[0]:
                 return
             initial_frame = extract_frame_as_image(self._path, 0)
@@ -140,6 +144,7 @@ class _FilePreloadTask(QRunnable):
                     initial_frame=initial_frame,
                     ass=ass_file,
                     groups=groups,
+                    duration=duration,
                     thumbnails=thumbnails,
                 )
                 self.signals.file_ready.emit(self._path, data)
@@ -495,6 +500,7 @@ class MainWindow(QMainWindow):
         self._timeline.time_seeked.connect(self._on_timeline_seeked)
         self._timeline.play_toggled.connect(self._on_play_toggled)
         self._timeline.step_requested.connect(self._on_timeline_step)
+        self._timeline.group_clicked.connect(self._goto_group)
 
         # mpv signals
         self._mpv_widget.time_pos_changed.connect(self._on_mpv_time_pos)
@@ -598,8 +604,10 @@ class MainWindow(QMainWindow):
         self._setup_worker.finished.connect(self._setup_thread.quit)
         self._setup_thread.start()
 
-    def _on_video_setup_done(self, fps: float, dims: object, frame: object) -> None:
+    def _on_video_setup_done(self, fps: float, dims: object, frame: object, duration: float = 0.0) -> None:
         self._player.set_fps(fps)
+        if duration > 0:
+            self._timeline.set_duration(duration)
 
         if isinstance(frame, QImage) and not frame.isNull():
             self._player.show_frame_from_image(frame)
@@ -783,6 +791,8 @@ class MainWindow(QMainWindow):
         self._playback_mode = False
         self._video_stack.setCurrentIndex(1)
         self._timeline.set_playing(False)
+        if data.duration > 0:
+            self._timeline.set_duration(data.duration)
 
         if data.initial_frame and not data.initial_frame.isNull():
             self._player.show_frame_from_image(data.initial_frame)
