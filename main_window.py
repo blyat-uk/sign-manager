@@ -342,6 +342,7 @@ class MainWindow(QMainWindow):
         self._ass: AssFile | None = None
         self._groups: list[LabelGroup] = []
         self._group_index: int = -1
+        self._playback_from_group: bool = True
         self._video_path: str | None = None
         self._ass_path: str | None = None
         self._style_clipboard: dict | None = None
@@ -945,6 +946,7 @@ class MainWindow(QMainWindow):
             return
         index = max(0, min(index, len(self._groups) - 1))
         self._group_index = index
+        self._playback_from_group = True
         group = self._groups[index]
         # If in playback mode, pause and enter edit mode
         if self._playback_mode:
@@ -958,9 +960,8 @@ class MainWindow(QMainWindow):
         self._timeline.set_time(group.representative_time)
 
     def _on_group_selected(self, index: int) -> None:
-        if index == self._group_index:
-            return
         self._group_index = index
+        self._playback_from_group = True
         if 0 <= index < len(self._groups):
             t = self._groups[index].representative_time
             # If in playback mode, switch to edit mode
@@ -1619,19 +1620,42 @@ class MainWindow(QMainWindow):
             text="New Label",
             font_size=self._ass.label_font_size,
         )
-        # Add to current group if one exists, otherwise refresh is needed
+        # Add to current group only if time ranges overlap, otherwise rebuild
         gi = self._group_index
+        added_to_current = False
         if 0 <= gi < len(self._groups):
-            self._groups[gi].labels.append(new_label)
-            self._gallery.refresh_thumbnail(gi)
-        else:
-            # No current group — full rebuild needed (first label ever)
+            group = self._groups[gi]
+            if group.labels:
+                group_start = min(lb.start_time for lb in group.labels)
+                group_end = max(lb.end_time for lb in group.labels)
+                if start_time <= group_end and end_time >= group_start:
+                    group.labels.append(new_label)
+                    group.representative_time = _best_representative_time(group.labels)
+                    self._gallery.refresh_thumbnail(gi)
+                    added_to_current = True
+        if not added_to_current:
             self._rebuild_gallery()
+            new_gi = self._group_index_for_label(new_label)
+            if new_gi >= 0:
+                self._goto_group(new_gi)
         self._player.show_time(self._player._current_time)
         self._dirty = True
         _status_msg(self, f"Created label at ({ass_x}, {ass_y})")
 
     # ── Playback / edit mode switching ──
+
+    def _playback_start_time(self) -> float:
+        """Return the time to start playback from.
+
+        If the user navigated via gallery/group selection, start from the
+        earliest label in the group.  If the user manually seeked or stepped
+        frames, start from their current position.
+        """
+        if self._playback_from_group and 0 <= self._group_index < len(self._groups):
+            group = self._groups[self._group_index]
+            if group.labels:
+                return min(lb.start_time for lb in group.labels)
+        return self._player._current_time
 
     def _enter_playback_mode(self) -> None:
         """Switch to mpv playback mode."""
@@ -1645,9 +1669,8 @@ class MainWindow(QMainWindow):
         self._video_stack.setCurrentIndex(0)
 
         if self._mpv_widget.is_file_loaded:
-            # Seek mpv to the current edit position and play
-            current_time = self._player._current_time
-            self._mpv_widget.seek_absolute(current_time)
+            start = self._playback_start_time()
+            self._mpv_widget.seek_absolute(start)
             self._mpv_widget.play()
         else:
             # File not yet loaded — wait for file_loaded signal
@@ -1660,8 +1683,8 @@ class MainWindow(QMainWindow):
     def _on_mpv_file_loaded_for_playback(self) -> None:
         """Called when mpv finishes loading a file and we want to start playback."""
         if self._playback_mode:
-            current_time = self._player._current_time
-            self._mpv_widget.seek_absolute(current_time)
+            start = self._playback_start_time()
+            self._mpv_widget.seek_absolute(start)
             self._mpv_widget.play()
             # Also load subtitles if we have them
             if self._ass_path:
@@ -1676,6 +1699,10 @@ class MainWindow(QMainWindow):
 
         time_pos = self._mpv_widget.time_pos
 
+        # Set _current_time BEFORE show_frame_from_image so the captured frame
+        # is cached under the mpv pause time, not the previous representative time.
+        self._player._current_time = time_pos
+
         if capture:
             frame_data = self._mpv_widget.capture_frame()
             if frame_data:
@@ -1684,8 +1711,6 @@ class MainWindow(QMainWindow):
                 # QImage doesn't copy the data, so .copy() ensures it's owned
                 img = img.copy()
                 self._player.show_frame_from_image(img)
-
-        self._player._current_time = time_pos
         self._player._update_visible_labels(time_pos)
         self._player._update_scaled_pixmap()
         self._player.update()
@@ -1715,6 +1740,7 @@ class MainWindow(QMainWindow):
 
     def _on_timeline_seeked(self, seconds: float) -> None:
         """Handle scrubber drag from timeline."""
+        self._playback_from_group = False
         if self._playback_mode:
             # Pause and enter edit mode at the seeked position
             self._mpv_widget.pause()
@@ -1729,6 +1755,7 @@ class MainWindow(QMainWindow):
 
     def _on_timeline_step(self, delta: int) -> None:
         """Handle frame step buttons from timeline."""
+        self._playback_from_group = False
         if self._playback_mode:
             self._enter_edit_mode()
         if delta > 0:
@@ -1739,6 +1766,7 @@ class MainWindow(QMainWindow):
 
     def _on_step_forward(self) -> None:
         """Arrow right — frame step in current mode."""
+        self._playback_from_group = False
         if self._playback_mode:
             self._mpv_widget.frame_step(forward=True)
         else:
@@ -1747,6 +1775,7 @@ class MainWindow(QMainWindow):
 
     def _on_step_backward(self) -> None:
         """Arrow left — frame step in current mode."""
+        self._playback_from_group = False
         if self._playback_mode:
             self._mpv_widget.frame_step(forward=False)
         else:
