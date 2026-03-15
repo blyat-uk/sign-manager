@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QCheckBox,
+    QComboBox,
 )
 
 from ass_parser import (
@@ -399,6 +400,10 @@ class MainWindow(QMainWindow):
 
         # Layout: splitter with video stack + timeline on top, gallery on bottom
         self._mpv_widget = MpvPreviewWidget()
+        # Apply saved mpv settings before GL init (initializeGL is lazy)
+        _init_settings = QSettings("SubLabelPos", "SubLabelPos")
+        self._mpv_widget._hwdec = _init_settings.value("mpv/hwdec", "auto-safe")
+        self._mpv_widget._hq = _init_settings.value("mpv/high_quality", False, type=bool)
         self._player = VideoFrameWidget()
         self._gallery = GalleryPanel()
         self._timeline = TimelineWidget()
@@ -442,6 +447,35 @@ class MainWindow(QMainWindow):
         self._main_tb.addSeparator()
         self._main_tb.addAction("Open ASS", self._open_ass)
         self._main_tb.addAction("Save ASS", self._save_ass)
+
+        # mpv rendering controls
+        self._main_tb.addSeparator()
+        self._main_tb.addWidget(QLabel("  HW Decode: "))
+        self._hwdec_combo = QComboBox()
+        self._hwdec_combo.setToolTip("Hardware decoding mode for mpv playback")
+        for label, value in [
+            ("Auto (safe)", "auto-safe"),
+            ("Auto (copy-back)", "auto-copy"),
+            ("Software", "no"),
+            ("VAAPI", "vaapi"),
+            ("VAAPI (copy)", "vaapi-copy"),
+            ("NVDEC", "nvdec"),
+            ("NVDEC (copy)", "nvdec-copy"),
+        ]:
+            self._hwdec_combo.addItem(label, value)
+        saved_hwdec = _init_settings.value("mpv/hwdec", "auto-safe")
+        idx = self._hwdec_combo.findData(saved_hwdec)
+        if idx >= 0:
+            self._hwdec_combo.setCurrentIndex(idx)
+        self._hwdec_combo.currentIndexChanged.connect(self._on_hwdec_changed)
+        self._main_tb.addWidget(self._hwdec_combo)
+
+        self._hq_checkbox = QCheckBox("High Quality")
+        self._hq_checkbox.setToolTip("Enable spline36 scaling, debanding, and other quality options")
+        self._hq_checkbox.setChecked(_init_settings.value("mpv/high_quality", False, type=bool))
+        self._hq_checkbox.toggled.connect(self._on_hq_toggled)
+        self._main_tb.addWidget(self._hq_checkbox)
+
         self._main_tb.hide()
 
         # Shortcuts — frame stepping (arrow keys)
@@ -1736,6 +1770,17 @@ class MainWindow(QMainWindow):
         """Handle end-of-file — switch to edit mode."""
         if self._playback_mode:
             self._enter_edit_mode(capture=False)
+
+    # ── mpv rendering settings ──
+
+    def _on_hwdec_changed(self, index: int) -> None:
+        value = self._hwdec_combo.currentData()
+        self._mpv_widget.set_hwdec(value)
+        self._settings.setValue("mpv/hwdec", value)
+
+    def _on_hq_toggled(self, checked: bool) -> None:
+        self._mpv_widget.set_high_quality(checked)
+        self._settings.setValue("mpv/high_quality", checked)
 
     # ── Cleanup ──
 

@@ -50,6 +50,8 @@ class MpvPreviewWidget(QOpenGLWidget):
         self._ass_path: str | None = None
         self._shutting_down = False
         self._file_loaded_flag = False
+        self._hwdec: str = "auto-safe"
+        self._hq: bool = False
 
         # Ensure locale is set for mpv
         locale.setlocale(locale.LC_NUMERIC, "C")
@@ -61,7 +63,7 @@ class MpvPreviewWidget(QOpenGLWidget):
             idle="yes",
             osd_level=0,
             sub_auto="no",
-            hwdec="auto-safe",
+            hwdec=self._hwdec,
             input_default_bindings="no",
             input_vo_keyboard="no",
         )
@@ -89,6 +91,10 @@ class MpvPreviewWidget(QOpenGLWidget):
         def _on_file_loaded(event):
             self._on_file_loaded_event(event)
         self._file_loaded_cb = _on_file_loaded  # prevent GC
+
+        # Apply HQ settings if enabled before GL init
+        if self._hq:
+            self.set_high_quality(True)
 
         # If a video was requested before GL init, load it now
         if self._video_path:
@@ -178,6 +184,37 @@ class MpvPreviewWidget(QOpenGLWidget):
         self.eof_reached.emit()
 
     # ── Public API ──
+
+    def set_hwdec(self, value: str) -> None:
+        """Change hardware decoding mode at runtime."""
+        self._hwdec = value
+        if self._mpv is not None:
+            try:
+                self._mpv.hwdec = value
+            except Exception:
+                pass
+
+    def set_high_quality(self, enabled: bool) -> None:
+        """Toggle high-quality rendering options (equivalent to gpu-hq profile)."""
+        self._hq = enabled
+        if self._mpv is not None:
+            try:
+                if enabled:
+                    self._mpv.scale = "spline36"
+                    self._mpv.cscale = "spline36"
+                    self._mpv.dscale = "mitchell"
+                    self._mpv.deband = True
+                    self._mpv["correct-downscaling"] = True
+                    self._mpv["sigmoid-upscaling"] = True
+                else:
+                    self._mpv.scale = "bilinear"
+                    self._mpv.cscale = "bilinear"
+                    self._mpv.dscale = "bilinear"
+                    self._mpv.deband = False
+                    self._mpv["correct-downscaling"] = False
+                    self._mpv["sigmoid-upscaling"] = False
+            except Exception:
+                pass
 
     def load(self, video_path: str) -> None:
         """Load a video file. If GL is not yet initialised, defers the load."""
