@@ -213,25 +213,31 @@ class MpvPreviewWidget(QOpenGLWidget):
     def load_subtitles(self, ass_path: str) -> None:
         """Add an ASS subtitle track for playback preview."""
         self._ass_path = ass_path
-        if self._mpv is not None:
+        if self._mpv is not None and self._file_loaded_flag:
             try:
                 self._mpv.command("sub-remove")
-            except mpv.MPVError:
+            except Exception:
                 pass
-            self._mpv.command("sub-add", ass_path, "select")
+            try:
+                self._mpv.command("sub-add", ass_path, "select")
+            except Exception:
+                pass
 
     def reload_subtitles(self) -> None:
         """Reload the subtitle file after edits."""
         if self._ass_path and self._mpv is not None:
             try:
                 self._mpv.command("sub-reload")
-            except mpv.MPVError:
+            except Exception:
                 # Fallback: remove + re-add
                 try:
                     self._mpv.command("sub-remove")
-                except mpv.MPVError:
+                except Exception:
                     pass
-                self._mpv.command("sub-add", self._ass_path, "select")
+                try:
+                    self._mpv.command("sub-add", self._ass_path, "select")
+                except Exception:
+                    pass
 
     def play(self) -> None:
         if self._mpv is not None:
@@ -266,7 +272,7 @@ class MpvPreviewWidget(QOpenGLWidget):
             try:
                 val = self._mpv.time_pos
                 return val if val is not None else 0.0
-            except mpv.MPVError:
+            except Exception:
                 return 0.0
         return 0.0
 
@@ -276,7 +282,7 @@ class MpvPreviewWidget(QOpenGLWidget):
             try:
                 val = self._mpv.duration
                 return val if val is not None else 0.0
-            except mpv.MPVError:
+            except Exception:
                 return 0.0
         return 0.0
 
@@ -286,7 +292,7 @@ class MpvPreviewWidget(QOpenGLWidget):
             try:
                 val = self._mpv.container_fps
                 return val if val is not None else 24.0
-            except mpv.MPVError:
+            except Exception:
                 return 24.0
         return 24.0
 
@@ -298,7 +304,7 @@ class MpvPreviewWidget(QOpenGLWidget):
                 h = self._mpv.video_params.get("h")
                 if w and h:
                     return (int(w), int(h))
-            except (mpv.MPVError, AttributeError, TypeError):
+            except Exception:
                 pass
         return None
 
@@ -311,7 +317,7 @@ class MpvPreviewWidget(QOpenGLWidget):
         if self._mpv is not None:
             try:
                 return bool(self._mpv.pause)
-            except mpv.MPVError:
+            except Exception:
                 return True
         return True
 
@@ -330,7 +336,7 @@ class MpvPreviewWidget(QOpenGLWidget):
             # img is a PIL Image in RGB mode
             w, h = img.size
             return img.tobytes(), w, h
-        except (mpv.MPVError, Exception):
+        except Exception:
             return None
 
     def shutdown(self) -> None:
