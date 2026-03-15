@@ -10,17 +10,19 @@ from PyQt6.QtWidgets import QWidget
 import mpv
 
 
-def _get_process_address(_, name: bytes) -> int:
+def _get_process_address(_ctx, name):
     """Callback for mpv to resolve OpenGL function addresses."""
     from PyQt6.QtGui import QOpenGLContext
-    ctx = QOpenGLContext.currentContext()
-    if ctx is None:
+    gl_ctx = QOpenGLContext.currentContext()
+    if gl_ctx is None:
         return 0
-    addr = ctx.getProcAddress(name)
+    addr = gl_ctx.getProcAddress(name)
     if addr is None:
         return 0
-    # sip.voidptr supports int() to get the raw address
     return int(addr)
+
+
+_proc_address_fn = mpv.MpvGlGetProcAddressFn(_get_process_address)
 
 
 class MpvPreviewWidget(QOpenGLWidget):
@@ -69,7 +71,7 @@ class MpvPreviewWidget(QOpenGLWidget):
             self._mpv,
             "opengl",
             opengl_init_params={
-                "get_proc_address": _get_process_address,
+                "get_proc_address": _proc_address_fn,
             },
         )
 
