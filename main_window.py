@@ -37,6 +37,8 @@ from ass_parser import (
 from video_widget import VideoFrameWidget, VideoSetupWorker, detect_fps, _get_video_dimensions, extract_frame_as_image
 from gallery_widget import GalleryPanel, LabelGroup, compute_label_groups, _crop_to_labels_image, _best_representative_time
 from label_toolbar import LabelToolbar
+from mpv_preview import MpvPreviewWidget
+from timeline_widget import TimelineWidget
 
 _VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".webm"}
 
@@ -335,11 +337,13 @@ class MainWindow(QMainWindow):
         self._groups: list[LabelGroup] = []
         self._group_index: int = -1
         self._video_path: str | None = None
+        self._ass_path: str | None = None
         self._style_clipboard: dict | None = None
         self.__dirty: bool = False
         self._folder_files: list[str] = []
         self._folder_index: int = -1
         self._suppress_resize: bool = False
+        self._playback_mode: bool = False  # True = mpv playing, False = edit mode
 
         # Async video setup
         self._setup_thread: QThread | None = None
@@ -388,12 +392,28 @@ class MainWindow(QMainWindow):
         self._files_dock.hide()
         self._file_list.currentRowChanged.connect(self._on_file_list_clicked)
 
-        # Layout: splitter with player on top, gallery on bottom
+        # Layout: splitter with video stack + timeline on top, gallery on bottom
+        self._mpv_widget = MpvPreviewWidget()
         self._player = VideoFrameWidget()
         self._gallery = GalleryPanel()
+        self._timeline = TimelineWidget()
+
+        # Video stack: page 0 = mpv (playback), page 1 = editor (QPainter)
+        self._video_stack = QStackedWidget()
+        self._video_stack.addWidget(self._mpv_widget)   # index 0
+        self._video_stack.addWidget(self._player)        # index 1
+        self._video_stack.setCurrentIndex(1)  # start in edit mode
+
+        # Container for video stack + timeline (no splitter between them)
+        video_container = QWidget()
+        vc_layout = QVBoxLayout(video_container)
+        vc_layout.setContentsMargins(0, 0, 0, 0)
+        vc_layout.setSpacing(0)
+        vc_layout.addWidget(self._video_stack, 1)
+        vc_layout.addWidget(self._timeline, 0)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.addWidget(self._player)
+        splitter.addWidget(video_container)
         splitter.addWidget(self._gallery)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
@@ -420,8 +440,8 @@ class MainWindow(QMainWindow):
         self._main_tb.hide()
 
         # Shortcuts — frame stepping (arrow keys)
-        QShortcut(QKeySequence(Qt.Key.Key_Right), self, lambda: self._player.step_frame(1))
-        QShortcut(QKeySequence(Qt.Key.Key_Left), self, lambda: self._player.step_frame(-1))
+        QShortcut(QKeySequence(Qt.Key.Key_Right), self, self._on_step_forward)
+        QShortcut(QKeySequence(Qt.Key.Key_Left), self, self._on_step_backward)
         # Gallery navigation (Ctrl+arrow keys)
         QShortcut(QKeySequence("Ctrl+Right"), self, lambda: self._goto_group(self._group_index + 1))
         QShortcut(QKeySequence("Ctrl+Left"), self, lambda: self._goto_group(self._group_index - 1))
@@ -434,6 +454,8 @@ class MainWindow(QMainWindow):
         # Bold/Italic shortcuts
         self._bold_shortcut = QShortcut(QKeySequence("Ctrl+B"), self, self._on_bold_shortcut)
         self._italic_shortcut = QShortcut(QKeySequence("Ctrl+I"), self, self._on_italic_shortcut)
+        # Play/pause toggle
+        QShortcut(QKeySequence(Qt.Key.Key_Space), self, self._toggle_playback)
 
         # ── Connect signals ──
 
@@ -468,6 +490,17 @@ class MainWindow(QMainWindow):
         self._toolbar.outline_width_changed.connect(self._on_outline_width_changed)
         self._toolbar.apply_style_clicked.connect(self._on_apply_style)
         self._toolbar.create_style_requested.connect(self._on_create_style)
+
+        # Timeline signals
+        self._timeline.time_seeked.connect(self._on_timeline_seeked)
+        self._timeline.play_toggled.connect(self._on_play_toggled)
+        self._timeline.step_requested.connect(self._on_timeline_step)
+
+        # mpv signals
+        self._mpv_widget.time_pos_changed.connect(self._on_mpv_time_pos)
+        self._mpv_widget.duration_changed.connect(self._on_mpv_duration)
+        self._mpv_widget.pause_changed.connect(self._on_mpv_pause_changed)
+        self._mpv_widget.eof_reached.connect(self._on_mpv_eof)
 
         # Welcome screen signals
         self._welcome.open_video_clicked.connect(self._open_video)
@@ -549,6 +582,11 @@ class MainWindow(QMainWindow):
         self._video_path = path
         self._suppress_resize = suppress_resize
         self._player.set_video(path)
+        self._mpv_widget.load(path)
+        # Ensure we're in edit mode when loading a new video
+        self._playback_mode = False
+        self._video_stack.setCurrentIndex(1)
+        self._timeline.set_playing(False)
         _status_msg(self, "Loading...", 0)
 
         # Start async video setup
@@ -740,6 +778,11 @@ class MainWindow(QMainWindow):
         self._video_path = path
         self._player.set_video(path)
         self._player.set_fps(data.fps)
+        self._mpv_widget.load(path)
+        # Ensure edit mode
+        self._playback_mode = False
+        self._video_stack.setCurrentIndex(1)
+        self._timeline.set_playing(False)
 
         if data.initial_frame and not data.initial_frame.isNull():
             self._player.show_frame_from_image(data.initial_frame)
@@ -761,17 +804,21 @@ class MainWindow(QMainWindow):
 
         if data.ass:
             self._ass = data.ass
+            self._ass_path = data.ass.path
             self._dirty = False
             self._player.set_ass(self._ass)
+            self._mpv_widget.load_subtitles(data.ass.path)
             self._toolbar.hide()
             self._gallery.set_data_preloaded(
                 path, data.ass, data.groups, data.thumbnails,
             )
             self._groups = self._gallery.groups
+            self._timeline.set_groups(self._groups)
             if self._groups:
                 self._goto_group(0)
         else:
             self._ass = None
+            self._ass_path = None
             self._groups = []
             self._group_index = -1
             self._gallery.clear()
@@ -788,13 +835,16 @@ class MainWindow(QMainWindow):
 
     def _load_ass(self, path: str) -> None:
         self._ass = AssFile(path)
+        self._ass_path = path
         self._dirty = False
         self._player.set_ass(self._ass)
+        self._mpv_widget.load_subtitles(path)
         self._toolbar.hide()
         _status_msg(self, f"Loaded {len(self._ass.labels)} labels from {path}")
 
         if self._video_path:
             self._rebuild_gallery()
+            self._timeline.set_groups(self._groups)
             if self._groups:
                 self._goto_group(0)
         else:
@@ -808,6 +858,7 @@ class MainWindow(QMainWindow):
             return
         self._ass.save()
         self._dirty = False
+        self._mpv_widget.reload_subtitles()
         self._repopulate_cache()
         _status_msg(self, f"Saved: {self._ass.path}")
 
@@ -836,6 +887,7 @@ class MainWindow(QMainWindow):
         if self._video_path and self._ass:
             self._gallery.set_data(self._video_path, self._ass)
             self._groups = self._gallery.groups
+            self._timeline.set_groups(self._groups)
 
     def _group_index_for_label(self, label: LabelDialogue) -> int:
         """Find which group a label belongs to, or -1."""
@@ -850,9 +902,16 @@ class MainWindow(QMainWindow):
         index = max(0, min(index, len(self._groups) - 1))
         self._group_index = index
         group = self._groups[index]
+        # If in playback mode, pause and enter edit mode
+        if self._playback_mode:
+            self._mpv_widget.pause()
+            self._playback_mode = False
+            self._video_stack.setCurrentIndex(1)
+            self._timeline.set_playing(False)
         self._player.show_time(group.representative_time)
         self._player.prefetch_around(group.representative_time)
         self._gallery.select_group(index)
+        self._timeline.set_time(group.representative_time)
 
     def _on_group_selected(self, index: int) -> None:
         if index == self._group_index:
@@ -860,8 +919,15 @@ class MainWindow(QMainWindow):
         self._group_index = index
         if 0 <= index < len(self._groups):
             t = self._groups[index].representative_time
+            # If in playback mode, switch to edit mode
+            if self._playback_mode:
+                self._mpv_widget.pause()
+                self._playback_mode = False
+                self._video_stack.setCurrentIndex(1)
+                self._timeline.set_playing(False)
             self._player.show_time(t)
             self._player.prefetch_around(t)
+            self._timeline.set_time(t)
 
     # ── Drag and drop ──
 
@@ -1521,6 +1587,146 @@ class MainWindow(QMainWindow):
         self._dirty = True
         _status_msg(self, f"Created label at ({ass_x}, {ass_y})")
 
+    # ── Playback / edit mode switching ──
+
+    def _enter_playback_mode(self) -> None:
+        """Switch to mpv playback mode."""
+        if self._playback_mode:
+            return
+        if not self._video_path:
+            return
+        self._playback_mode = True
+        self._toolbar.hide()
+        # Switch to mpv widget (triggers initializeGL on first use)
+        self._video_stack.setCurrentIndex(0)
+
+        if self._mpv_widget.is_file_loaded:
+            # Seek mpv to the current edit position and play
+            current_time = self._player._current_time
+            self._mpv_widget.seek_absolute(current_time)
+            self._mpv_widget.play()
+        else:
+            # File not yet loaded — wait for file_loaded signal
+            self._mpv_widget.file_loaded.connect(
+                self._on_mpv_file_loaded_for_playback,
+                Qt.ConnectionType.SingleShotConnection,
+            )
+        self._timeline.set_playing(True)
+
+    def _on_mpv_file_loaded_for_playback(self) -> None:
+        """Called when mpv finishes loading a file and we want to start playback."""
+        if self._playback_mode:
+            current_time = self._player._current_time
+            self._mpv_widget.seek_absolute(current_time)
+            self._mpv_widget.play()
+            # Also load subtitles if we have them
+            if self._ass_path:
+                self._mpv_widget.load_subtitles(self._ass_path)
+
+    def _enter_edit_mode(self, capture: bool = True) -> None:
+        """Switch to QPainter edit mode, optionally capturing mpv's current frame."""
+        if not self._playback_mode:
+            return
+        self._mpv_widget.pause()
+        self._playback_mode = False
+
+        time_pos = self._mpv_widget.time_pos
+
+        if capture:
+            frame_data = self._mpv_widget.capture_frame()
+            if frame_data:
+                rgb_bytes, w, h = frame_data
+                img = QImage(rgb_bytes, w, h, w * 3, QImage.Format.Format_RGB888)
+                # QImage doesn't copy the data, so .copy() ensures it's owned
+                img = img.copy()
+                self._player.show_frame_from_image(img)
+
+        self._player._current_time = time_pos
+        self._player._update_visible_labels(time_pos)
+        self._player._update_scaled_pixmap()
+        self._player.update()
+
+        self._video_stack.setCurrentIndex(1)
+        self._timeline.set_playing(False)
+        self._timeline.set_time(time_pos)
+
+    def _toggle_playback(self) -> None:
+        """Toggle between playback and edit modes (Space bar)."""
+        # Don't toggle if inline text editor is active
+        if self._player._text_edit is not None:
+            return
+        if not self._video_path:
+            return
+        if self._playback_mode:
+            self._enter_edit_mode()
+        else:
+            self._enter_playback_mode()
+
+    def _on_play_toggled(self, playing: bool) -> None:
+        """Handle play/pause button from timeline widget."""
+        if playing:
+            self._enter_playback_mode()
+        else:
+            self._enter_edit_mode()
+
+    def _on_timeline_seeked(self, seconds: float) -> None:
+        """Handle scrubber drag from timeline."""
+        if self._playback_mode:
+            # Pause and enter edit mode at the seeked position
+            self._mpv_widget.pause()
+            self._playback_mode = False
+            self._mpv_widget.seek_absolute(seconds)
+            self._video_stack.setCurrentIndex(1)
+            self._timeline.set_playing(False)
+            # Use ffmpeg to extract the frame in edit mode
+            self._player.show_time(seconds)
+        else:
+            self._player.show_time(seconds)
+
+    def _on_timeline_step(self, delta: int) -> None:
+        """Handle frame step buttons from timeline."""
+        if self._playback_mode:
+            self._enter_edit_mode()
+        if delta > 0:
+            self._player.step_frame(1)
+        else:
+            self._player.step_frame(-1)
+        self._timeline.set_time(self._player._current_time)
+
+    def _on_step_forward(self) -> None:
+        """Arrow right — frame step in current mode."""
+        if self._playback_mode:
+            self._mpv_widget.frame_step(forward=True)
+        else:
+            self._player.step_frame(1)
+            self._timeline.set_time(self._player._current_time)
+
+    def _on_step_backward(self) -> None:
+        """Arrow left — frame step in current mode."""
+        if self._playback_mode:
+            self._mpv_widget.frame_step(forward=False)
+        else:
+            self._player.step_frame(-1)
+            self._timeline.set_time(self._player._current_time)
+
+    def _on_mpv_time_pos(self, seconds: float) -> None:
+        """Sync timeline with mpv playback position."""
+        if self._playback_mode:
+            self._timeline.set_time(seconds)
+
+    def _on_mpv_duration(self, duration: float) -> None:
+        """Update timeline when mpv reports video duration."""
+        self._timeline.set_duration(duration)
+
+    def _on_mpv_pause_changed(self, paused: bool) -> None:
+        """Handle mpv pause state changes."""
+        self._timeline.set_playing(not paused)
+
+    def _on_mpv_eof(self) -> None:
+        """Handle end-of-file — switch to edit mode."""
+        if self._playback_mode:
+            self._enter_edit_mode(capture=False)
+
     # ── Cleanup ──
 
     def closeEvent(self, event: QCloseEvent | None) -> None:  # type: ignore[override]
@@ -1543,5 +1749,6 @@ class MainWindow(QMainWindow):
         self._cancel_video_setup()
         self._gallery._cancel_loading()
         self._gallery._cancel_single_refresh()
+        self._mpv_widget.shutdown()
         self._player.shutdown()
         super().closeEvent(event)
