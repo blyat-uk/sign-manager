@@ -510,6 +510,8 @@ class MainWindow(QMainWindow):
         self._player.editing_cancelled.connect(self._on_editing_cancelled)
         self._player.context_menu_requested.connect(self._on_context_menu)
         self._player.empty_context_menu_requested.connect(self._on_empty_context_menu)
+        self._player.drag_started.connect(self._on_drag_started)
+        self._player.drag_finished.connect(self._on_drag_finished)
 
         # Gallery signals
         self._gallery.group_selected.connect(self._on_group_selected)
@@ -1083,6 +1085,12 @@ class MainWindow(QMainWindow):
         self._bold_shortcut.setEnabled(True)
         self._italic_shortcut.setEnabled(True)
 
+    def _on_drag_started(self) -> None:
+        self._toolbar.hide()
+
+    def _on_drag_finished(self) -> None:
+        self._refresh_toolbar_for_selection()
+
     def _update_toolbar_position(self) -> None:
         """Position toolbar above the first selected label's rect."""
         selected = self._player.selected_labels()
@@ -1128,6 +1136,10 @@ class MainWindow(QMainWindow):
             return
         selected = self._player.selected_labels()
         if not selected:
+            # No editor labels selected — try deleting selected gallery group
+            gi = self._gallery._selected_index
+            if gi >= 0:
+                self._delete_group(gi)
             return
         self._toolbar.hide()
         self._player.clear_selection()

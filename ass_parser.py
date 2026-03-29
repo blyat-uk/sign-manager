@@ -345,8 +345,6 @@ class AssFile:
             if len(parts) < 10:
                 continue
             style = parts[3].strip()
-            if style not in self.styles:
-                continue
             start_str = parts[1].strip()
             end_str = parts[2].strip()
             text_field = parts[9]
@@ -354,6 +352,10 @@ class AssFile:
             m = _POS_RE.search(text_field)
             if not m:
                 continue
+
+            # Auto-create missing styles referenced by \pos() dialogues
+            if style not in self.styles:
+                self.styles[style] = AssStyle(name=style)
 
             pos_x = int(float(m.group(1)))
             pos_y = int(float(m.group(2)))

@@ -224,6 +224,8 @@ class VideoFrameWidget(QWidget):
     context_menu_requested = pyqtSignal(QPointF)
     empty_context_menu_requested = pyqtSignal(QPointF)
     selection_cleared = pyqtSignal()
+    drag_started = pyqtSignal()   # emitted when move or rotate drag begins
+    drag_finished = pyqtSignal()  # emitted when move or rotate drag ends
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -275,7 +277,7 @@ class VideoFrameWidget(QWidget):
         self._handle_label: LabelDialogue | None = None
 
         # Snap guides
-        self._snap_lines: list[tuple[QPointF, QPointF]] = []
+        self._snap_lines: list[tuple[QPointF, QPointF, bool]] = []  # (p1, p2, is_screen_center)
         self._SNAP_THRESHOLD = 8
 
         # Inline text editing
@@ -793,9 +795,12 @@ class VideoFrameWidget(QWidget):
 
         # Draw snap guide lines
         if self._snap_lines:
-            pen = QPen(QColor(0, 180, 255, 180), 1, Qt.PenStyle.DashLine)
-            painter.setPen(pen)
-            for p1, p2 in self._snap_lines:
+            for p1, p2, is_screen_center in self._snap_lines:
+                if is_screen_center:
+                    pen = QPen(QColor(255, 180, 0, 180), 1, Qt.PenStyle.DashLine)
+                else:
+                    pen = QPen(QColor(0, 180, 255, 180), 1, Qt.PenStyle.DashLine)
+                painter.setPen(pen)
                 painter.drawLine(p1, p2)
 
         painter.end()
@@ -850,6 +855,8 @@ class VideoFrameWidget(QWidget):
                             pos.y() - anchor.y(), pos.x() - anchor.x()
                         )
                         self._rotate_initial_frz = label.rotation if label.rotation is not None else 0.0
+                if mode == _DragMode.ROTATE:
+                    self.drag_started.emit()
                 event.accept()
                 return
 
@@ -1020,6 +1027,7 @@ class VideoFrameWidget(QWidget):
         assert self._press_pos is not None
         self._drag_offset = anchor - self._press_pos
         self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+        self.drag_started.emit()
 
     def _do_drag_move(self, current_pos: QPointF):
         if not self._dragging:
@@ -1039,36 +1047,78 @@ class VideoFrameWidget(QWidget):
         # Offset from rect center to anchor point
         offset = tent_center - new_anchor
 
-        # Collect centers of other visible (non-selected) labels for snapping
-        snap_lines: list[tuple[QPointF, QPointF]] = []
+        # Snap: check dragged label edges/center against other labels and screen center
         snapped_cx, snapped_cy = tent_center.x(), tent_center.y()
-        snapped_x = False
-        snapped_y = False
+        best_dx: float | None = None
+        best_dy: float | None = None
+        snap_guide_x: float | None = None
+        snap_guide_y: float | None = None
+        is_screen_center_x = False
+        is_screen_center_y = False
+
+        dragged_xs = [tent_rect.left(), tent_center.x(), tent_rect.right()]
+        dragged_ys = [tent_rect.top(), tent_center.y(), tent_rect.bottom()]
 
         for other in self._visible_labels:
             if other.line_index in self._selected:
                 continue
             other_font = self._font_for_label(other)
             other_rect = self._compute_rect(other, other_font)
-            other_cx = other_rect.center().x()
-            other_cy = other_rect.center().y()
+            other_xs = [other_rect.left(), other_rect.center().x(), other_rect.right()]
+            other_ys = [other_rect.top(), other_rect.center().y(), other_rect.bottom()]
 
-            if not snapped_x and abs(tent_center.x() - other_cx) < self._SNAP_THRESHOLD:
-                snapped_cx = other_cx
-                snapped_x = True
-                snap_lines.append((
-                    QPointF(other_cx, self._frame_y),
-                    QPointF(other_cx, self._frame_y + self._frame_h),
-                ))
+            for dx in dragged_xs:
+                for ox in other_xs:
+                    dist = abs(dx - ox)
+                    if dist < self._SNAP_THRESHOLD and (best_dx is None or dist < best_dx):
+                        best_dx = dist
+                        snapped_cx = tent_center.x() + (ox - dx)
+                        snap_guide_x = ox
+                        is_screen_center_x = False
 
-            if not snapped_y and abs(tent_center.y() - other_cy) < self._SNAP_THRESHOLD:
-                snapped_cy = other_cy
-                snapped_y = True
-                snap_lines.append((
-                    QPointF(self._frame_x, other_cy),
-                    QPointF(self._frame_x + self._frame_w, other_cy),
-                ))
+            for dy in dragged_ys:
+                for oy in other_ys:
+                    dist = abs(dy - oy)
+                    if dist < self._SNAP_THRESHOLD and (best_dy is None or dist < best_dy):
+                        best_dy = dist
+                        snapped_cy = tent_center.y() + (oy - dy)
+                        snap_guide_y = oy
+                        is_screen_center_y = False
 
+        # Screen center snap
+        frame_mid_x = self._frame_x + self._frame_w / 2.0
+        frame_mid_y = self._frame_y + self._frame_h / 2.0
+
+        for dx in dragged_xs:
+            dist = abs(dx - frame_mid_x)
+            if dist < self._SNAP_THRESHOLD and (best_dx is None or dist < best_dx):
+                best_dx = dist
+                snapped_cx = tent_center.x() + (frame_mid_x - dx)
+                snap_guide_x = frame_mid_x
+                is_screen_center_x = True
+
+        for dy in dragged_ys:
+            dist = abs(dy - frame_mid_y)
+            if dist < self._SNAP_THRESHOLD and (best_dy is None or dist < best_dy):
+                best_dy = dist
+                snapped_cy = tent_center.y() + (frame_mid_y - dy)
+                snap_guide_y = frame_mid_y
+                is_screen_center_y = True
+
+        # Build snap guide lines
+        snap_lines: list[tuple[QPointF, QPointF, bool]] = []
+        if snap_guide_x is not None:
+            snap_lines.append((
+                QPointF(snap_guide_x, self._frame_y),
+                QPointF(snap_guide_x, self._frame_y + self._frame_h),
+                is_screen_center_x,
+            ))
+        if snap_guide_y is not None:
+            snap_lines.append((
+                QPointF(self._frame_x, snap_guide_y),
+                QPointF(self._frame_x + self._frame_w, snap_guide_y),
+                is_screen_center_y,
+            ))
         self._snap_lines = snap_lines
 
         # Derive snapped anchor from snapped center
@@ -1100,6 +1150,7 @@ class VideoFrameWidget(QWidget):
         self._snap_lines.clear()
         self._multi_drag_initial.clear()
         self.update()
+        self.drag_finished.emit()
 
     # ── Resize / Rotate drag ──
 
@@ -1149,6 +1200,7 @@ class VideoFrameWidget(QWidget):
             self.label_rotated.emit(label, rotation)
         self._handle_label = None
         self.update()
+        self.drag_finished.emit()
 
     # ── Inline text editing ──
 
