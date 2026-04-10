@@ -1,35 +1,57 @@
 #!/usr/bin/env python3
+import shutil
 import sys
 
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 
-def _check_mpv() -> bool:
-    """Verify that python-mpv and libmpv are available."""
+def _check_dependencies() -> list[str]:
+    """Return a list of missing runtime dependencies."""
+    missing: list[str] = []
+
     try:
         import mpv
-        # Try creating a temporary instance to verify libmpv is loadable
         player = mpv.MPV(vo="null", idle="yes")
         player.terminate()
-        return True
     except Exception:
-        return False
+        missing.append("libmpv")
+
+    if shutil.which("ffmpeg") is None:
+        missing.append("ffmpeg")
+    if shutil.which("ffprobe") is None:
+        missing.append("ffprobe")
+
+    return missing
+
+
+def _missing_dependencies_message(missing: list[str]) -> str:
+    lines = ["The following required dependencies are missing:", ""]
+    lines += [f"  \u2022 {dep}" for dep in missing]
+    lines += [
+        "",
+        "Install them via your system package manager:",
+        "",
+        "  Arch:    sudo pacman -S mpv ffmpeg",
+        "  Ubuntu:  sudo apt install libmpv2 ffmpeg",
+        "  Fedora:  sudo dnf install mpv-libs ffmpeg",
+        "  macOS:   brew install mpv ffmpeg",
+        "",
+        "Windows: install mpv and ffmpeg and make sure",
+        "         libmpv-2.dll, ffmpeg.exe, and ffprobe.exe",
+        "         are available on your PATH.",
+    ]
+    return "\n".join(lines)
 
 
 def main():
     app = QApplication(sys.argv)
 
-    if not _check_mpv():
+    missing = _check_dependencies()
+    if missing:
         QMessageBox.critical(
             None,
-            "Missing Dependency",
-            "mpv is required but not available.\n\n"
-            "Install python-mpv:\n"
-            "  pip install mpv\n\n"
-            "Install libmpv:\n"
-            "  Arch: pacman -S mpv\n"
-            "  Ubuntu: apt install libmpv-dev\n"
-            "  macOS: brew install mpv",
+            "Missing Dependencies",
+            _missing_dependencies_message(missing),
         )
         sys.exit(1)
 
