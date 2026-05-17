@@ -1281,8 +1281,25 @@ class VideoFrameWidget(QWidget):
         self._prefetch_worker.frame_ready.connect(self._on_prefetch_frame)
         self._prefetch_worker.finished.connect(self._prefetch_thread.quit)
         self._prefetch_worker.finished.connect(self._prefetch_worker.deleteLater)
+        # Connect ref-clearing slot BEFORE deleteLater so the Python wrapper
+        # doesn't outlive the C++ object — otherwise the next
+        # _cancel_prefetch would call .quit() on a deleted wrapper and crash
+        # with 'wrapped C/C++ object of type QThread has been deleted'.
+        self._prefetch_thread.finished.connect(self._on_prefetch_thread_finished)
         self._prefetch_thread.finished.connect(self._prefetch_thread.deleteLater)
         self._prefetch_thread.start()
+
+    def _on_prefetch_thread_finished(self) -> None:
+        """Null prefetch refs when the thread finishes naturally.
+
+        Uses sender() identity check so an older thread's late-firing
+        finished signal doesn't accidentally null the refs of a newer
+        thread that has already replaced it.
+        """
+        sender = self.sender()
+        if self._prefetch_thread is sender:
+            self._prefetch_thread = None
+            self._prefetch_worker = None
 
     def _on_prefetch_frame(self, cs_key: int, pixmap: QPixmap) -> None:
         if cs_key not in self._cache:

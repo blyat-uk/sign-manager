@@ -705,8 +705,26 @@ class GalleryPanel(QWidget):
         self._thumb_worker.thumbnail_ready.connect(self._on_thumbnail_ready)
         self._thumb_worker.finished.connect(self._thumb_thread.quit)
         self._thumb_worker.finished.connect(self._thumb_worker.deleteLater)
+        # Connect ref-clearing slot BEFORE deleteLater so we null our Python
+        # references while the C++ object is still alive. Without this, the
+        # wrapper would survive deleteLater and the next _cancel_loading call
+        # would crash with 'wrapped C/C++ object of type QThread has been
+        # deleted'.
+        self._thumb_thread.finished.connect(self._on_thumb_thread_finished)
         self._thumb_thread.finished.connect(self._thumb_thread.deleteLater)
         self._thumb_thread.start()
+
+    def _on_thumb_thread_finished(self) -> None:
+        """Null bulk-thumbnail refs when the thread finishes naturally.
+
+        Uses sender() identity check so an older thread's late-firing
+        finished signal doesn't accidentally null the refs of a newer
+        thread that has already replaced it.
+        """
+        sender = self.sender()
+        if self._thumb_thread is sender:
+            self._thumb_thread = None
+            self._thumb_worker = None
 
     def _on_thumbnail_ready(self, index: int, image: QImage):
         if 0 <= index < len(self._thumbnails):
@@ -762,8 +780,18 @@ class GalleryPanel(QWidget):
         self._single_worker.thumbnail_ready.connect(self._on_single_thumbnail_ready)
         self._single_worker.finished.connect(self._single_thread.quit)
         self._single_worker.finished.connect(self._single_worker.deleteLater)
+        # See _on_thumb_thread_finished for rationale.
+        self._single_thread.finished.connect(self._on_single_thread_finished)
         self._single_thread.finished.connect(self._single_thread.deleteLater)
         self._single_thread.start()
+
+    def _on_single_thread_finished(self) -> None:
+        """Null single-thumbnail refs when the thread finishes naturally.
+        See :meth:`_on_thumb_thread_finished` for rationale."""
+        sender = self.sender()
+        if self._single_thread is sender:
+            self._single_thread = None
+            self._single_worker = None
 
     def _on_single_thumbnail_ready(self, index: int, image: QImage):
         if 0 <= index < len(self._thumbnails):
