@@ -2112,34 +2112,70 @@ class MainWindow(QMainWindow):
 
     def _on_context_menu(self, pos: QPointF) -> None:
         menu = QMenu(self)
-        selected = self._player.selected_labels()
+        menu.setStyleSheet(
+            f"QMenu {{ background: {theme.Tokens.bg_raised}; "
+            f"color: {theme.Tokens.text_primary}; "
+            f"border: 1px solid {theme.Tokens.border_strong}; "
+            f"border-radius: 6px; padding: 4px 0; font-size: 11.5px; }}"
+            f"QMenu::item {{ padding: 5px 28px 5px 12px; }}"
+            f"QMenu::item:selected {{ background: {theme.Tokens.bg_hover}; "
+            f"color: {theme.Tokens.text_emphasis}; }}"
+            f"QMenu::separator {{ height: 1px; background: {theme.Tokens.border}; "
+            f"margin: 4px 0; }}"
+        )
 
-        menu.addAction("Duplicate", self._on_duplicate)
-        menu.addAction("Delete", self._on_delete)
-        menu.addSeparator()
+        selected = self._player.selected_labels()
+        single = len(selected) == 1
+
+        if single:
+            act = menu.addAction(theme.Icons.edit_text(), "Edit text")
+            act.triggered.connect(lambda: self._on_edit_requested(selected[0]))
+
+            act = menu.addAction(theme.Icons.duplicate(), "Duplicate")
+            act.setShortcut(shortcuts.DUPLICATE)
+            act.triggered.connect(self._on_duplicate)
+
+            menu.addSeparator()
+
+            act = menu.addAction(theme.Icons.copy_style(), "Copy style…")
+            act.triggered.connect(self._on_copy_style)
+
+        if self._style_clipboard is not None:
+            act = menu.addAction(theme.Icons.paste_style(), "Paste style")
+            act.setShortcut(shortcuts.PASTE_STYLE)
+            act.triggered.connect(self._on_paste_style)
 
         if len(selected) >= 2:
-            menu.addAction("Sync Times", lambda: self._on_sync_times(selected))
+            menu.addSeparator()
+            act = menu.addAction(theme.Icons.sync_times(), "Sync times")
+            act.triggered.connect(lambda: self._on_sync_times(selected))
 
         if 2 <= len(selected) <= 3:
             self._build_merge_submenu(menu, selected)
 
-        if len(selected) == 1:
-            menu.addAction("Edit Text", lambda: self._on_edit_requested(selected[0]))
-            menu.addAction("Copy Style", lambda: self._on_copy_style())
-        if self._style_clipboard is not None:
-            menu.addAction("Paste Style", self._on_paste_style)
+        menu.addSeparator()
+        act = menu.addAction(theme.Icons.delete(color=theme.Tokens.danger), "Delete")
+        act.setShortcut(shortcuts.DELETE_SELECTED)
+        act.triggered.connect(self._on_delete)
 
-        # Map position from player widget to global
         global_pos = self._player.mapToGlobal(pos.toPoint())
         menu.exec(global_pos)
 
     def _on_gallery_context_menu(self, index: int) -> None:
         if not (0 <= index < len(self._groups)):
             return
-
         menu = QMenu(self)
-        menu.addAction("Delete", lambda: self._delete_group(index))
+        menu.setStyleSheet(
+            f"QMenu {{ background: {theme.Tokens.bg_raised}; "
+            f"color: {theme.Tokens.text_primary}; "
+            f"border: 1px solid {theme.Tokens.border_strong}; "
+            f"border-radius: 6px; padding: 4px 0; font-size: 11.5px; }}"
+            f"QMenu::item {{ padding: 5px 28px 5px 12px; }}"
+            f"QMenu::item:selected {{ background: {theme.Tokens.bg_hover}; "
+            f"color: {theme.Tokens.text_emphasis}; }}"
+        )
+        act = menu.addAction(theme.Icons.delete(color=theme.Tokens.danger), "Delete")
+        act.triggered.connect(lambda: self._delete_group(index))
         menu.exec(QCursor.pos())
 
     def _build_merge_submenu(self, menu: QMenu, selected: list[LabelDialogue]) -> None:
@@ -2178,8 +2214,21 @@ class MainWindow(QMainWindow):
 
     def _on_empty_context_menu(self, pos: QPointF) -> None:
         menu = QMenu(self)
-        menu.addAction("Create Label", lambda: self._create_label_at(pos))
-
+        menu.setStyleSheet(
+            f"QMenu {{ background: {theme.Tokens.bg_raised}; "
+            f"color: {theme.Tokens.text_primary}; "
+            f"border: 1px solid {theme.Tokens.border_strong}; "
+            f"border-radius: 6px; padding: 4px 0; font-size: 11.5px; }}"
+            f"QMenu::item {{ padding: 5px 28px 5px 12px; }}"
+            f"QMenu::item:selected {{ background: {theme.Tokens.bg_hover}; "
+            f"color: {theme.Tokens.text_emphasis}; }}"
+        )
+        act = menu.addAction(theme.Icons.duplicate(), "Create label")
+        act.triggered.connect(lambda: self._create_label_at(pos))
+        if self._style_clipboard is not None:
+            act = menu.addAction(theme.Icons.paste_style(), "Paste style")
+            act.setShortcut(shortcuts.PASTE_STYLE)
+            act.triggered.connect(self._on_paste_style)
         global_pos = self._player.mapToGlobal(pos.toPoint())
         menu.exec(global_pos)
 
