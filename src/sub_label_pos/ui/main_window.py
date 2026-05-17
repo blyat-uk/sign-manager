@@ -79,6 +79,15 @@ def _anchor_for_alignment(rect: QRectF, alignment: int) -> QPointF:
     return QPointF(ax, ay)
 
 
+def _format_hms(seconds: float) -> str:
+    total_ms = int(seconds * 1000)
+    h = total_ms // 3_600_000
+    m = (total_ms // 60_000) % 60
+    s = (total_ms // 1000) % 60
+    ms = total_ms % 1000
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+
 def _status_msg(window: QMainWindow, msg: str, timeout: int = 3000) -> None:
     bar = window.statusBar()
     if bar:
@@ -743,6 +752,42 @@ class MainWindow(QMainWindow):
 
         self._main_tb.hide()  # shown when editor page is active (existing behavior)
 
+        # --- Status bar (Task 13) ---
+        sb = self.statusBar()
+        sb.setStyleSheet(
+            f"QStatusBar {{ background: {theme.Tokens.bg_deepest}; "
+            f"border-top: 1px solid {theme.Tokens.border}; }}"
+            f"QStatusBar::item {{ border: none; }}"
+        )
+
+        self._sb_file = theme.StatusChip(theme.Icons.folder(), "—")
+        self._sb_file_index = theme.StatusChip(theme.Icons.files(), "")
+        self._sb_modified = theme.StatusChip(
+            theme.Icons.modified_dot(color=theme.Tokens.alert),
+            "unsaved", alert=True,
+        )
+        self._sb_time = theme.StatusChip(theme.Icons.time(), "—")
+        self._sb_counts = theme.StatusChip(theme.Icons.style_tag(), "0 labels · 0 groups")
+        self._sb_resolution = theme.StatusChip(theme.Icons.resolution(), "—")
+        self._sb_hw = theme.StatusChip(theme.Icons.cpu(), "—")
+
+        sb.addWidget(self._sb_file)
+        sb.addWidget(self._sb_file_index)
+        sb.addWidget(self._sb_modified)
+        # Right side: addPermanentWidget pushes right
+        sb.addPermanentWidget(self._sb_time)
+        sb.addPermanentWidget(self._sb_counts)
+        sb.addPermanentWidget(self._sb_resolution)
+        sb.addPermanentWidget(self._sb_hw)
+
+        # Initial visibility
+        self._sb_file_index.hide()
+        self._sb_modified.hide()
+
+        # Wire signals
+        self._store.labels_mutated.connect(self._on_labels_mutated_for_status)
+        self._playback.time_changed.connect(self._on_time_changed_for_status)
+
         # Shortcuts — frame stepping (arrow keys)
         QShortcut(shortcuts.NEXT_FRAME, self, self._on_step_forward)
         QShortcut(shortcuts.PREV_FRAME, self, self._on_step_backward)
@@ -942,6 +987,8 @@ class MainWindow(QMainWindow):
 
         self._update_window_title()
         _status_msg(self, f"Loaded: {self._video_path}")
+        if hasattr(self, "_sb_file"):
+            self._refresh_all_status_chips()
 
     def _on_file_load_failed(self, path: object, err: str) -> None:
         QMessageBox.critical(
@@ -1193,6 +1240,8 @@ class MainWindow(QMainWindow):
 
         self._update_window_title()
         _status_msg(self, f"Loaded: {path}")
+        if hasattr(self, "_sb_file"):
+            self._refresh_all_status_chips()
 
     def _open_ass(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -1200,6 +1249,60 @@ class MainWindow(QMainWindow):
         )
         if path:
             self._apply_loaded_ass(AssFile(path), path)
+
+    # ── Status bar helpers (Task 13) ──
+
+    def _on_labels_mutated_for_status(self, _ids) -> None:
+        self._sb_modified.show()
+        self._update_status_counts()
+
+    def _on_time_changed_for_status(self, current_s: float) -> None:
+        self._sb_time.set_text(_format_hms(current_s))
+
+    def _update_status_file(self) -> None:
+        if not self._video_path:
+            self._sb_file.set_text("—")
+            return
+        self._sb_file.set_text(Path(self._video_path).name)
+
+    def _update_status_counts(self) -> None:
+        n_labels = len(self._store.state.labels) if self._store.state else 0
+        n_groups = len(self._groups) if hasattr(self, "_groups") else 0
+        self._sb_counts.set_text(f"{n_labels} labels · {n_groups} groups")
+
+    def _update_status_resolution(self) -> None:
+        if self._ass is not None and hasattr(self._ass, "play_res_x"):
+            self._sb_resolution.set_text(
+                f"{self._ass.play_res_x}×{self._ass.play_res_y}"
+            )
+        else:
+            self._sb_resolution.set_text("—")
+
+    def _update_status_hw(self) -> None:
+        hw = self._init_settings.value("mpv/hwdec", "auto-safe")
+        q = "HQ" if self._app_settings.perf.mpv_quality == "high" else "SQ"
+        self._sb_hw.set_text(f"{hw} · {q}")
+
+    def _update_status_file_index(self) -> None:
+        """Show 'N / M' chip when in folder mode, hide otherwise."""
+        files = getattr(self, "_folder_files", None) or []
+        if files and self._video_path:
+            try:
+                idx = files.index(self._video_path)
+                self._sb_file_index.set_text(f"{idx + 1} / {len(files)}")
+                self._sb_file_index.show()
+                return
+            except ValueError:
+                pass
+        self._sb_file_index.hide()
+
+    def _refresh_all_status_chips(self) -> None:
+        """Call after a successful file load."""
+        self._update_status_file()
+        self._update_status_counts()
+        self._update_status_resolution()
+        self._update_status_hw()
+        self._update_status_file_index()
 
     def _on_redetect_hardware(self) -> None:
         """Re-run hardware detection and rewrite the persisted defaults.
@@ -1266,6 +1369,9 @@ class MainWindow(QMainWindow):
         # Clear the unsaved-dot on the primary Save button (Task 12)
         if hasattr(self, "_save_btn"):
             self._save_btn.set_unsaved(False)
+        # Hide the unsaved chip in the status bar (Task 13)
+        if hasattr(self, "_sb_modified"):
+            self._sb_modified.hide()
 
     def _repopulate_cache(self) -> None:
         """Rebuild the preload cache entry from current live state."""
@@ -1351,6 +1457,17 @@ class MainWindow(QMainWindow):
             self._player.show_time(t)
             self._player.prefetch_around(t)
             self._timeline.set_time(t)
+
+    # ── Responsive resize (Task 13) ──
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if not hasattr(self, "_sb_hw"):
+            return  # too early in init
+        w = self.width()
+        self._sb_hw.setVisible(w >= 1100)
+        self._sb_resolution.setVisible(w >= 950)
+        self._sb_counts.setVisible(w >= 800)
 
     # ── Drag and drop ──
 
