@@ -56,6 +56,27 @@ _TIER_DEFAULTS = {
     "high":   PerfSettings(thumb_max_dim=1080, thumb_jpeg_quality=7, frame_cache_size=64, preload_workers=2, frame_queue_workers=3, mpv_quality="high", gallery_enabled=True,  preload_ring=4),
 }
 
+# User-facing labels for the hardware tiers. The internal tier names
+# ("low" / "medium" / "high") remain unchanged in the settings file for
+# backward compatibility.
+TIER_ORDER = ["low", "medium", "high"]
+TIER_LABELS = {
+    "low":    "Performance",
+    "medium": "Balanced",
+    "high":   "Quality",
+}
+
+
+def apply_tier(settings: AppSettings, tier: str) -> AppSettings:
+    """Overwrite ``perf`` with the named tier's defaults and update
+    ``hardware_tier``. Returns the same settings instance for chaining.
+    """
+    if tier not in _TIER_DEFAULTS:
+        raise ValueError(f"unknown tier: {tier!r}")
+    settings.hardware_tier = tier
+    settings.perf = PerfSettings(**asdict(_TIER_DEFAULTS[tier]))
+    return settings
+
 
 def from_profile(profile: HardwareProfile) -> AppSettings:
     """Build AppSettings from a fresh hardware detection."""

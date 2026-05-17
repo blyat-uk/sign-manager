@@ -155,3 +155,5 @@ profile_default/
 
 site/
 .superpowers/
+
+.claude/

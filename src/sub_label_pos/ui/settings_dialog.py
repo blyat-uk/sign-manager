@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QFormLayout, QGroupBox,
+    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox,
     QCheckBox, QComboBox, QPushButton, QLabel, QDialogButtonBox,
 )
 
 from sub_label_pos.services.app_settings import (
-    AppSettings, save_perf, save_display,
+    AppSettings, TIER_LABELS, TIER_ORDER, apply_tier, save,
 )
 from sub_label_pos.ui import theme
 
@@ -26,15 +26,20 @@ _HWDEC_OPTIONS = [
 
 
 class SettingsDialog(QDialog):
-    """Modal settings dialog. Emits hardware_redetect_requested when user clicks Re-detect."""
+    """Modal settings dialog."""
 
     hardware_redetect_requested = pyqtSignal()
+    # Emitted with the chosen tier ("low"/"medium"/"high") when the user
+    # picks a different tier and clicks OK. Caller persists + may prompt
+    # the user to restart for cache/worker settings to take effect.
+    tier_overridden = pyqtSignal(str)
 
     def __init__(self, settings: AppSettings, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Preferences")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(440)
         self._settings = settings
+        self._initial_tier = settings.hardware_tier
         self._build_ui()
 
     def _build_ui(self):
@@ -65,18 +70,51 @@ class SettingsDialog(QDialog):
         layout.addWidget(playback_box)
 
         # --- Hardware ---
-        hw_box = QGroupBox("Hardware")
+        hw_box = QGroupBox("Hardware profile")
         hw_layout = QVBoxLayout(hw_box)
-        tier_label = QLabel(
-            f"Detected tier: <b>{self._settings.hardware_tier}</b>  "
-            f"(RAM {self._settings.detected_ram_gb:.1f} GB · "
-            f"{self._settings.detected_cpu_cores} cores)"
+
+        # Tier selector row: combo + re-detect button
+        tier_row = QHBoxLayout()
+        tier_row.setSpacing(8)
+        tier_row.addWidget(QLabel("Profile:"))
+        self._tier_combo = QComboBox()
+        for tier in TIER_ORDER:
+            self._tier_combo.addItem(TIER_LABELS[tier], tier)
+        idx = TIER_ORDER.index(self._settings.hardware_tier) \
+            if self._settings.hardware_tier in TIER_ORDER else 1  # default Balanced
+        self._tier_combo.setCurrentIndex(idx)
+        tier_row.addWidget(self._tier_combo, 1)
+        redetect_btn = QPushButton("Auto-detect")
+        redetect_btn.setToolTip(
+            "Re-run hardware detection and reset the profile to the recommended tier."
         )
-        tier_label.setStyleSheet(f"color: {theme.Tokens.text_primary};")
-        redetect_btn = QPushButton("Re-detect Hardware…")
         redetect_btn.clicked.connect(self.hardware_redetect_requested.emit)
-        hw_layout.addWidget(tier_label)
-        hw_layout.addWidget(redetect_btn)
+        tier_row.addWidget(redetect_btn)
+        hw_layout.addLayout(tier_row)
+
+        # Detected hardware info (read-only)
+        detected_label = QLabel(
+            f"Detected: <b>{self._settings.detected_ram_gb:.1f} GB</b> RAM · "
+            f"<b>{self._settings.detected_cpu_cores}</b> cores · "
+            f"auto-tier <b>{TIER_LABELS.get(self._settings.hardware_tier, self._settings.hardware_tier)}</b>"
+        )
+        detected_label.setStyleSheet(
+            f"color: {theme.Tokens.text_muted}; font-size: 11px;"
+        )
+        hw_layout.addWidget(detected_label)
+
+        # Footnote: tier changes need restart for cache/worker counts
+        hint = QLabel(
+            "Profile changes affect thumbnail size, cache size, and worker "
+            "count. Restart the app for the new values to take effect."
+        )
+        hint.setStyleSheet(
+            f"color: {theme.Tokens.text_muted}; font-size: 10.5px; "
+            f"font-style: italic;"
+        )
+        hint.setWordWrap(True)
+        hw_layout.addWidget(hint)
+
         layout.addWidget(hw_box)
 
         # --- Buttons ---
@@ -96,11 +134,28 @@ class SettingsDialog(QDialog):
     def selected_hwdec(self) -> str:
         return self._hwdec_combo.currentData()
 
+    def selected_tier(self) -> str:
+        return self._tier_combo.currentData()
+
     def _on_accept(self):
-        # Mutate the settings object the caller passed in, then persist
+        # Mutate the settings object the caller passed in, then persist.
         self._settings.display.gallery_visible = self._gallery_cb.isChecked()
         self._settings.display.sidebar_visible = self._sidebar_cb.isChecked()
+
+        new_tier = self.selected_tier()
+        tier_changed = new_tier != self._initial_tier
+        if tier_changed:
+            # Apply the tier's defaults (overwrites perf). User-chosen HQ
+            # below is then re-stamped on top so it survives the tier swap.
+            apply_tier(self._settings, new_tier)
+
         self._settings.perf.mpv_quality = "high" if self._hq_cb.isChecked() else "low"
-        save_display(self._settings.display)
-        save_perf(self._settings.perf)
+
+        # Full save (display + perf + hardware_tier together) — a per-section
+        # save_perf would round-trip through disk and lose the just-changed tier.
+        save(self._settings)
+
+        if tier_changed:
+            self.tier_overridden.emit(new_tier)
+
         self.accept()

@@ -1417,9 +1417,10 @@ class MainWindow(QMainWindow):
             # extracting them itself, and refire groups_changed so the
             # gallery picks them up.
             self._apply_loaded_ass(data.ass, data.ass.path)
-            self._gallery.cache_preloaded_thumbnails(
-                data.ass, self._groups_model.groups, data.thumbnails,
-            )
+            if self._should_generate_gallery():
+                self._gallery.cache_preloaded_thumbnails(
+                    data.ass, self._groups_model.groups, data.thumbnails,
+                )
             self._groups_model.groups_changed.emit(set())
         else:
             self._ass = None
@@ -1466,6 +1467,18 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_gallery_handle"):
             self._gallery_handle.set_counts(n_groups, n_labels)
 
+    def _should_generate_gallery(self) -> bool:
+        """Return False when the gallery is hidden on a Performance-tier
+        machine, to skip all thumbnail extraction / caching work entirely.
+
+        On Balanced/Quality tiers we keep the existing behavior (still
+        precompute thumbs so toggling the gallery on is instant). Only the
+        low tier opts out of work for a hidden gallery.
+        """
+        if self._app_settings.hardware_tier != "low":
+            return True
+        return self._app_settings.display.gallery_visible
+
     def _update_status_resolution(self) -> None:
         if self._ass is not None and hasattr(self._ass, "play_res_x"):
             self._sb_resolution.set_text(
@@ -1508,21 +1521,23 @@ class MainWindow(QMainWindow):
         applied at MainWindow construction time, so a restart is required
         for the new values to take effect.
         """
+        from sub_label_pos.services.app_settings import TIER_LABELS
         new_settings = redetect_settings()
         old = self._app_settings
         new = new_settings
+        old_label = TIER_LABELS.get(old.hardware_tier, old.hardware_tier)
+        new_label = TIER_LABELS.get(new.hardware_tier, new.hardware_tier)
         msg = (
             f"Detected: {new.detected_ram_gb:.1f} GB RAM, "
             f"{new.detected_cpu_cores} cores\n"
-            f"Tier: {old.hardware_tier} → {new.hardware_tier}\n\n"
-            f"thumb_max_dim: {old.perf.thumb_max_dim} → {new.perf.thumb_max_dim}\n"
-            f"jpeg_quality: {old.perf.thumb_jpeg_quality} → {new.perf.thumb_jpeg_quality}\n"
-            f"frame_cache_size: {old.perf.frame_cache_size} → {new.perf.frame_cache_size}\n"
-            f"preload_workers: {old.perf.preload_workers} → {new.perf.preload_workers}\n"
-            f"frame_queue_workers: {old.perf.frame_queue_workers} → {new.perf.frame_queue_workers}\n\n"
+            f"Profile: {old_label} → {new_label}\n\n"
+            f"thumb max dim: {old.perf.thumb_max_dim} → {new.perf.thumb_max_dim}\n"
+            f"frame cache size: {old.perf.frame_cache_size} → {new.perf.frame_cache_size}\n"
+            f"preload workers: {old.perf.preload_workers} → {new.perf.preload_workers}\n"
+            f"frame queue workers: {old.perf.frame_queue_workers} → {new.perf.frame_queue_workers}\n\n"
             "Restart the app for the new values to take effect."
         )
-        QMessageBox.information(self, "Hardware Re-detected", msg)
+        QMessageBox.information(self, "Hardware re-detected", msg)
         self._app_settings = new_settings
 
     def _save_ass(self) -> None:
@@ -2540,6 +2555,7 @@ class MainWindow(QMainWindow):
         saved_hwdec = self._init_settings.value("mpv/hwdec", "auto-safe")
         dialog.set_initial_hwdec(saved_hwdec)
         dialog.hardware_redetect_requested.connect(self._on_redetect_hardware)
+        dialog.tier_overridden.connect(self._on_tier_overridden)
         if dialog.exec():
             new_hwdec = dialog.selected_hwdec()
             self._init_settings.setValue("mpv/hwdec", new_hwdec)
@@ -2547,6 +2563,21 @@ class MainWindow(QMainWindow):
             self._on_hq_toggled(self._app_settings.perf.mpv_quality == "high")
             self._on_gallery_toggled(self._app_settings.display.gallery_visible)
             self._on_sidebar_toggled(self._app_settings.display.sidebar_visible)
+            self._update_status_hw()
+
+    def _on_tier_overridden(self, new_tier: str) -> None:
+        """User explicitly picked a different performance profile in the
+        Settings dialog. Most perf knobs (cache size, worker counts, thumb
+        max-dim) take effect only on next launch — inform the user.
+        """
+        from sub_label_pos.services.app_settings import TIER_LABELS
+        QMessageBox.information(
+            self,
+            "Performance profile changed",
+            f"Profile set to <b>{TIER_LABELS.get(new_tier, new_tier)}</b>.\n\n"
+            "Restart the app for cache size, worker count, and thumbnail "
+            "settings to take effect.",
+        )
 
     # ── Cleanup ──
 
