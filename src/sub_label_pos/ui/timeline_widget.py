@@ -1,18 +1,18 @@
 """TimelineWidget — video scrubber with playback controls and label group markers."""
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal, QRectF
+from PyQt6.QtCore import Qt, pyqtSignal, QRectF, QSize
 from PyQt6.QtGui import QPainter, QColor, QPen
 from PyQt6.QtWidgets import (
     QWidget,
     QHBoxLayout,
     QVBoxLayout,
-    QPushButton,
     QLabel,
 )
 
 from sub_label_pos.model.ass_file import _seconds_to_time
 from sub_label_pos.model.groups import DerivedGroupModel
+from sub_label_pos.ui import theme
 
 
 class _TrackWidget(QWidget):
@@ -59,38 +59,54 @@ class _TrackWidget(QWidget):
         return max(0.0, min(t, self._duration))
 
     def paintEvent(self, event) -> None:
+        from PyQt6.QtGui import QPainter, QColor, QPen, QLinearGradient
+        from PyQt6.QtCore import QRectF, Qt
+        from sub_label_pos.ui import theme
+
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
 
-        h = self.height()
-        track_y = h // 2 - 2
-        track_h = 4
-
-        # Track background
+        # Track background (centered horizontal rounded rect, ~8px tall)
+        track_y = h // 2 - 4
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(60, 60, 60))
-        p.drawRoundedRect(QRectF(4, track_y, self.width() - 8, track_h), 2, 2)
+        p.setBrush(QColor("#222428"))
+        p.drawRoundedRect(QRectF(0, track_y, w, 8), 4, 4)
+
+        # Fill up to playhead (accent gradient)
+        if self._duration > 0:
+            fill_w = int(w * (self._position / self._duration))
+            grad = QLinearGradient(0, 0, fill_w, 0)
+            grad.setColorAt(0, QColor(theme.Tokens.accent_deep))
+            grad.setColorAt(1, QColor(theme.Tokens.accent))
+            p.setBrush(grad)
+            p.drawRoundedRect(QRectF(0, track_y, fill_w, 8), 4, 4)
 
         # Group markers
-        marker_color = QColor(80, 130, 180, 140)
-        p.setBrush(marker_color)
-        for start, end in self._group_ranges:
-            x1 = self._time_to_x(start)
-            x2 = self._time_to_x(end)
-            w = max(x2 - x1, 3)  # minimum 3px width so markers are visible
-            p.drawRoundedRect(QRectF(x1, track_y - 2, w, track_h + 4), 2, 2)
+        for start_s, end_s in self._group_ranges:
+            if self._duration <= 0:
+                continue
+            start_x = (start_s / self._duration) * w
+            end_x = (end_s / self._duration) * w
+            marker_w = max(3, end_x - start_x)
+            p.setBrush(QColor(180, 200, 220, 90))
+            p.drawRoundedRect(QRectF(start_x, track_y, marker_w, 8), 2, 2)
 
-        # Progress fill
+        # Playhead — chunky white circle + glow
         if self._duration > 0:
-            pos_x = self._time_to_x(self._position)
-            p.setBrush(QColor(100, 160, 220))
-            p.drawRoundedRect(QRectF(4, track_y, pos_x - 4, track_h), 2, 2)
-
-            # Playhead
-            p.setBrush(QColor(220, 220, 220))
-            p.setPen(QPen(QColor(40, 40, 40), 1))
-            radius = 6
-            p.drawEllipse(QRectF(pos_x - radius, h / 2 - radius, radius * 2, radius * 2))
+            ph_x = (self._position / self._duration) * w
+            # Glow line
+            glow = QColor(theme.Tokens.text_emphasis)
+            glow.setAlpha(100)
+            p.setPen(QPen(glow, 4))
+            p.drawLine(int(ph_x), 4, int(ph_x), h - 4)
+            # Crisp line
+            p.setPen(QPen(QColor(theme.Tokens.text_emphasis), 2))
+            p.drawLine(int(ph_x), 4, int(ph_x), h - 4)
+            # Circle grip
+            p.setPen(QPen(QColor(theme.Tokens.bg_deepest), 2))
+            p.setBrush(QColor(theme.Tokens.text_emphasis))
+            p.drawEllipse(QRectF(ph_x - 6, h / 2 - 6, 12, 12))
 
         p.end()
 
@@ -149,49 +165,39 @@ class TimelineWidget(QWidget):
         self._duration: float = 0.0
         self._playing = False
 
-        self.setStyleSheet("background: #2d2d2d;")
+        self.setStyleSheet(f"background: {theme.Tokens.bg_deepest};")
 
         # Controls row
         controls = QHBoxLayout()
         controls.setContentsMargins(8, 4, 8, 0)
         controls.setSpacing(4)
 
-        # Play/pause button
-        self._play_btn = QPushButton("\u25B6")  # ▶
-        self._play_btn.setFixedSize(28, 28)
-        self._play_btn.setStyleSheet("""
-            QPushButton {
-                background: #404040; color: #ddd; border: 1px solid #555;
-                border-radius: 4px; font-size: 12px;
-            }
-            QPushButton:hover { background: #505050; }
-        """)
-        self._play_btn.clicked.connect(self._on_play_clicked)
-        controls.addWidget(self._play_btn)
-
-        # Frame step backward
-        self._back_btn = QPushButton("\u23EA")  # ⏪
-        self._back_btn.setFixedSize(28, 28)
-        self._back_btn.setStyleSheet("""
-            QPushButton {
-                background: #404040; color: #ddd; border: 1px solid #555;
-                border-radius: 4px; font-size: 11px;
-            }
-            QPushButton:hover { background: #505050; }
-        """)
+        # Step backward
+        self._back_btn = theme.IconButton(
+            theme.Icons.step_back(),
+            tooltip="Previous frame (←)",
+            icon_only=True,
+        )
         self._back_btn.clicked.connect(lambda: self.step_requested.emit(-1))
         controls.addWidget(self._back_btn)
 
-        # Frame step forward
-        self._fwd_btn = QPushButton("\u23E9")  # ⏩
-        self._fwd_btn.setFixedSize(28, 28)
-        self._fwd_btn.setStyleSheet("""
-            QPushButton {
-                background: #404040; color: #ddd; border: 1px solid #555;
-                border-radius: 4px; font-size: 11px;
-            }
-            QPushButton:hover { background: #505050; }
-        """)
+        # Play/pause
+        self._play_btn = theme.IconButton(
+            theme.Icons.play(color=theme.Tokens.accent),
+            tooltip="Play / Pause (Space)",
+            icon_only=True,
+        )
+        self._play_btn.setFixedSize(34, 30)
+        self._play_btn.setIconSize(QSize(22, 22))
+        self._play_btn.clicked.connect(self._on_play_clicked)
+        controls.addWidget(self._play_btn)
+
+        # Step forward
+        self._fwd_btn = theme.IconButton(
+            theme.Icons.step_forward(),
+            tooltip="Next frame (→)",
+            icon_only=True,
+        )
         self._fwd_btn.clicked.connect(lambda: self.step_requested.emit(1))
         controls.addWidget(self._fwd_btn)
 
@@ -199,7 +205,10 @@ class TimelineWidget(QWidget):
 
         # Time label
         self._time_label = QLabel("0:00:00.00 / 0:00:00.00")
-        self._time_label.setStyleSheet("color: #ccc; font-family: monospace; font-size: 12px;")
+        self._time_label.setStyleSheet(
+            f"color: {theme.Tokens.text_primary}; font-family: ui-monospace, Menlo, Consolas, monospace; "
+            f"font-size: 11px; font-variant-numeric: tabular-nums; padding: 0 8px; background: transparent;"
+        )
         controls.addWidget(self._time_label)
 
         controls.addStretch()
@@ -245,7 +254,7 @@ class TimelineWidget(QWidget):
     def set_playing(self, playing: bool) -> None:
         """Update play/pause button state without emitting play_toggled."""
         self._playing = playing
-        self._play_btn.setText("\u23F8" if playing else "\u25B6")  # ⏸ or ▶
+        self._update_play_icon()
 
     # ── Internal ──
 
@@ -256,8 +265,13 @@ class TimelineWidget(QWidget):
 
     def _on_play_clicked(self) -> None:
         self._playing = not self._playing
-        self._play_btn.setText("\u23F8" if self._playing else "\u25B6")
+        self._update_play_icon()
         self.play_toggled.emit(self._playing)
+
+    def _update_play_icon(self) -> None:
+        icon = theme.Icons.pause(color=theme.Tokens.accent) if self._playing \
+            else theme.Icons.play(color=theme.Tokens.accent)
+        self._play_btn.setIcon(icon)
 
     def _on_track_seeked(self, seconds: float) -> None:
         self._update_time_label(seconds)
