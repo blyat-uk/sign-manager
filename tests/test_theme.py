@@ -75,3 +75,37 @@ def test_primary_button_unsaved_dot(qapp):
     assert btn._unsaved is True
     btn.set_unsaved(False)
     assert btn._unsaved is False
+
+
+def test_stepper_emits_and_clamps(qapp):
+    s = theme.Stepper(10, step=2, minimum=8, maximum=16)
+    emitted = []
+    s.value_changed.connect(emitted.append)
+    s._on_plus(); s._on_plus(); s._on_plus(); s._on_plus()  # 10→12→14→16→clamp
+    s._on_minus()  # 16→14
+    assert emitted == [12, 14, 16, 14]
+
+
+def test_segmented_toggle_exclusive(qapp):
+    seg = theme.SegmentedToggle([
+        ('L', theme.Icons.align_left(), 'L'),
+        ('C', theme.Icons.align_center(), 'C'),
+    ])
+    seg.set_selected('L')
+    assert seg._btns['L'].isChecked()
+    assert not seg._btns['C'].isChecked()
+    seg.set_selected('C')
+    assert not seg._btns['L'].isChecked()
+    assert seg._btns['C'].isChecked()
+    seg.set_selected(None)
+    assert not seg._btns['L'].isChecked()
+    assert not seg._btns['C'].isChecked()
+
+
+def test_color_swatch_mixed(qapp):
+    from PyQt6.QtGui import QColor
+    sw = theme.ColorSwatch()
+    sw.set_color(QColor("#ff0000"))
+    assert sw.color().name() == "#ff0000"
+    sw.set_color(None)
+    assert sw.color() is None

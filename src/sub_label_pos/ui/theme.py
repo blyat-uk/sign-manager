@@ -12,9 +12,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal, QSize
 from PyQt6.QtGui import QIcon, QColor, QPainter
-from PyQt6.QtWidgets import QPushButton
+from PyQt6.QtWidgets import QPushButton, QWidget, QHBoxLayout, QLabel, QFrame
 import qtawesome as qta
 
 
@@ -402,3 +402,170 @@ class PrimaryButton(QPushButton):
         y = 5
         p.drawEllipse(x, y, 6, 6)
         p.end()
+
+
+_STEPPER_QSS = f"""
+QFrame#stepper {{
+    background: {Tokens.bg_surface};
+    border: 1px solid {Tokens.border};
+    border-radius: {Tokens.r_md - 1}px;
+}}
+QLabel#stepper-value {{
+    color: {Tokens.text_emphasis};
+    font-size: 11px;
+    font-weight: 600;
+    padding: 0 {Tokens.sp_2}px;
+    min-width: 18px;
+    background: transparent;
+}}
+"""
+
+
+class Stepper(QWidget):
+    """Minus / value / plus stepper. Emits value_changed(int) on each click."""
+
+    value_changed = pyqtSignal(int)
+
+    def __init__(
+        self,
+        initial: int,
+        *,
+        step: int = 1,
+        minimum: int | None = None,
+        maximum: int | None = None,
+        suffix: str = "",
+        minus_tooltip: str = "Decrease",
+        plus_tooltip: str = "Increase",
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._value = initial
+        self._step = step
+        self._min = minimum
+        self._max = maximum
+        self._suffix = suffix
+
+        frame = QFrame(self)
+        frame.setObjectName("stepper")
+        frame.setStyleSheet(_STEPPER_QSS)
+
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(1, 1, 1, 1)
+        layout.setSpacing(0)
+
+        self._minus = IconButton(Icons.minus(), tooltip=minus_tooltip, icon_only=True)
+        self._minus.setFixedSize(24, 24)
+        self._minus.setIconSize(QSize(14, 14))
+        self._minus.clicked.connect(self._on_minus)
+
+        self._value_label = QLabel(self._format(initial))
+        self._value_label.setObjectName("stepper-value")
+        self._value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self._plus = IconButton(Icons.plus(), tooltip=plus_tooltip, icon_only=True)
+        self._plus.setFixedSize(24, 24)
+        self._plus.setIconSize(QSize(14, 14))
+        self._plus.clicked.connect(self._on_plus)
+
+        layout.addWidget(self._minus)
+        layout.addWidget(self._value_label)
+        layout.addWidget(self._plus)
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(frame)
+
+    def _format(self, v: int | None) -> str:
+        if v is None:
+            return "—"
+        return f"{v}{self._suffix}"
+
+    def _on_minus(self):
+        new = self._value - self._step
+        if self._min is not None and new < self._min:
+            return
+        self._value = new
+        self._value_label.setText(self._format(new))
+        self.value_changed.emit(new)
+
+    def _on_plus(self):
+        new = self._value + self._step
+        if self._max is not None and new > self._max:
+            return
+        self._value = new
+        self._value_label.setText(self._format(new))
+        self.value_changed.emit(new)
+
+    def set_value(self, v: int | None) -> None:
+        """Update displayed value WITHOUT emitting (use for external sync). None = mixed."""
+        self._value = v if v is not None else self._value
+        self._value_label.setText(self._format(v))
+
+
+class SegmentedToggle(QWidget):
+    """Group of mutually-exclusive `IconButton`s. Each option is (key, icon, tooltip).
+
+    Emits selected(key) when the user picks one. set_selected(key | None) updates
+    display without emitting; None clears all (use for multi-select 'mixed' state).
+    """
+
+    selected = pyqtSignal(object)  # key
+
+    def __init__(self, options: "list[tuple[object, QIcon, str]]", *, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(1)
+
+        self._btns: dict[object, IconButton] = {}
+        for key, icon, tip in options:
+            btn = IconButton(icon, tooltip=tip, icon_only=True)
+            btn.setCheckable(True)
+            btn.setFixedSize(28, 26)
+            btn.clicked.connect(lambda _checked, k=key: self._on_clicked(k))
+            layout.addWidget(btn)
+            self._btns[key] = btn
+
+    def _on_clicked(self, key: object) -> None:
+        self.set_selected(key)
+        self.selected.emit(key)
+
+    def set_selected(self, key: object | None) -> None:
+        for k, btn in self._btns.items():
+            btn.blockSignals(True)
+            btn.setChecked(k == key)
+            btn.blockSignals(False)
+
+
+class ColorSwatch(QPushButton):
+    """22x22 square color swatch with border. set_color(None) shows mixed state."""
+
+    def __init__(self, *, tooltip: str = "", parent=None):
+        super().__init__(parent)
+        self.setFixedSize(22, 22)
+        if tooltip:
+            self.setToolTip(tooltip)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._color: QColor | None = None
+        self.set_color(QColor("#888888"))
+
+    def set_color(self, color: QColor | None) -> None:
+        self._color = color
+        if color is None:
+            self.setStyleSheet(
+                f"QPushButton {{ background: {Tokens.border_strong}; "
+                f"color: {Tokens.text_primary}; border: 1.5px solid {Tokens.border_strong}; "
+                f"border-radius: {Tokens.r_md - 2}px; }}"
+                f"QPushButton:hover {{ border-color: {Tokens.text_muted}; }}"
+            )
+            return
+        self.setStyleSheet(
+            f"QPushButton {{ background: {color.name()}; "
+            f"border: 1.5px solid {Tokens.border_strong}; "
+            f"border-radius: {Tokens.r_md - 2}px; }}"
+            f"QPushButton:hover {{ border-color: {Tokens.text_emphasis}; }}"
+        )
+
+    def color(self) -> QColor | None:
+        return self._color
