@@ -63,11 +63,22 @@ def from_profile(profile: HardwareProfile) -> AppSettings:
 
 
 def _settings_path() -> Path:
-    """Platform-appropriate config directory for sub-label-pos."""
+    """Platform-appropriate path for settings.json.
+
+    Relies on ``QApplication.setOrganizationName`` and
+    ``setApplicationName`` (set in ``app.main``) so that
+    ``QStandardPaths.AppConfigLocation`` is already scoped per-app.
+    Only the bare ``settings.json`` filename is appended.
+
+    Fallback (no QApplication / unusual env) lands in
+    ``~/.config/sub-label-pos/settings.json``.
+    """
     base = QStandardPaths.writableLocation(
         QStandardPaths.StandardLocation.AppConfigLocation
-    ) or os.path.expanduser("~/.config")
-    return Path(base) / "sub-label-pos" / "settings.json"
+    )
+    if base:
+        return Path(base) / "settings.json"
+    return Path(os.path.expanduser("~/.config")) / "sub-label-pos" / "settings.json"
 
 
 def load(path: Path | None = None) -> AppSettings:

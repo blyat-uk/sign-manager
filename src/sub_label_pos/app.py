@@ -45,6 +45,11 @@ def _missing_dependencies_message(missing: list[str]) -> str:
 
 def main():
     app = QApplication(sys.argv)
+    # Identify the app so QStandardPaths.AppConfigLocation returns a clean
+    # per-app config dir (and QSettings shares the same scope). Must happen
+    # before any code reads QStandardPaths or AppSettings.
+    app.setOrganizationName("BGPP")
+    app.setApplicationName("sub-label-pos")
 
     missing = _check_dependencies()
     if missing:

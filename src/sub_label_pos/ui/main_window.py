@@ -41,7 +41,7 @@ from sub_label_pos.model.ass_file import (
 )
 from sub_label_pos.model.groups import DerivedGroupModel
 from sub_label_pos.model.label_store import LabelStore
-from sub_label_pos.services.app_settings import load as load_settings
+from sub_label_pos.services.app_settings import load as load_settings, redetect as redetect_settings
 from sub_label_pos.services.exceptions import VideoServiceError
 from sub_label_pos.services.ffmpeg_service import FFmpegVideoService
 from sub_label_pos.services.frame_cache import FrameCache
@@ -541,6 +541,10 @@ class MainWindow(QMainWindow):
         # The toolbar derives its display state from store signals; MainWindow
         # only routes the user-driven button actions.
         self._toolbar = LabelToolbar(self._store, parent=self._player)
+
+        # Menu bar (currently only holds rarely-used settings actions)
+        menu_settings = self.menuBar().addMenu("&Settings")
+        menu_settings.addAction("Re-detect Hardware…", self._on_redetect_hardware)
 
         # Main toolbar
         self._main_tb = QToolBar("Main")
@@ -1052,6 +1056,31 @@ class MainWindow(QMainWindow):
         )
         if path:
             self._apply_loaded_ass(AssFile(path), path)
+
+    def _on_redetect_hardware(self) -> None:
+        """Re-run hardware detection and rewrite the persisted defaults.
+
+        Most perf knobs (FrameCache size, FrameRequestQueue workers,
+        thumbnail max-dim/quality, FolderPreloadWorker concurrency) are
+        applied at MainWindow construction time, so a restart is required
+        for the new values to take effect.
+        """
+        new_settings = redetect_settings()
+        old = self._app_settings
+        new = new_settings
+        msg = (
+            f"Detected: {new.detected_ram_gb:.1f} GB RAM, "
+            f"{new.detected_cpu_cores} cores\n"
+            f"Tier: {old.hardware_tier} → {new.hardware_tier}\n\n"
+            f"thumb_max_dim: {old.perf.thumb_max_dim} → {new.perf.thumb_max_dim}\n"
+            f"jpeg_quality: {old.perf.thumb_jpeg_quality} → {new.perf.thumb_jpeg_quality}\n"
+            f"frame_cache_size: {old.perf.frame_cache_size} → {new.perf.frame_cache_size}\n"
+            f"preload_workers: {old.perf.preload_workers} → {new.perf.preload_workers}\n"
+            f"frame_queue_workers: {old.perf.frame_queue_workers} → {new.perf.frame_queue_workers}\n\n"
+            "Restart the app for the new values to take effect."
+        )
+        QMessageBox.information(self, "Hardware Re-detected", msg)
+        self._app_settings = new_settings
 
     def _save_ass(self) -> None:
         """Save by reconstructing the .ass from the store's state snapshot.
