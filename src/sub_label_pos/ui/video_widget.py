@@ -484,24 +484,27 @@ class VideoFrameWidget(QWidget):
         synchronous ``_extract_frame`` fallback runs inline as before.
         """
         self._current_time = seconds
-        self._update_visible_labels(seconds)
 
         if not self._video_path:
+            self._update_visible_labels(seconds)
             return
 
         cs_key = int(round(seconds * 100))
         if cs_key in self._cache:
+            # Cache hit: swap labels + pixmap together so the user never
+            # sees the new label positions over the old frame.
             self._cache.move_to_end(cs_key)
             self._pixmap = self._cache[cs_key]
+            self._update_visible_labels(seconds)
             self._update_scaled_pixmap()
             self.update()
             return
 
         # Cache miss.
         if self._frame_queue is not None:
-            # Keep the previous pixmap on-screen as a placeholder; request
-            # the new frame asynchronously. Stale-seq results are filtered
-            # in _on_async_frame_ready.
+            # Keep the previous pixmap AND the previous labels on-screen
+            # until the new frame arrives — _on_async_frame_ready calls
+            # _update_visible_labels so labels and frame swap atomically.
             self._pending_seek_seq = self._frame_queue.request(
                 Path(self._video_path), seconds,
                 max_dim=self._target_max_dim,
@@ -511,7 +514,7 @@ class VideoFrameWidget(QWidget):
             self.update()
             return
 
-        # Synchronous fallback (no queue injected).
+        # Synchronous fallback (no queue injected): frame + labels together.
         pixmap = self._extract_frame(seconds)
         if pixmap and not pixmap.isNull():
             self._pixmap = pixmap
@@ -519,6 +522,7 @@ class VideoFrameWidget(QWidget):
             while len(self._cache) > self._cache_max:
                 self._cache.popitem(last=False)
 
+        self._update_visible_labels(seconds)
         self._update_scaled_pixmap()
         self.update()
 
@@ -570,6 +574,9 @@ class VideoFrameWidget(QWidget):
         self._cache[cs_key] = pm
         while len(self._cache) > self._cache_max:
             self._cache.popitem(last=False)
+        # Swap labels to match the new frame in the same paint cycle so the
+        # user never sees mismatched label positions over the old frame.
+        self._update_visible_labels(self._current_time)
         self._update_scaled_pixmap()
         self.update()
 
