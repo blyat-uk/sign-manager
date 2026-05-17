@@ -29,6 +29,7 @@ class PerfSettings:
     frame_queue_workers: int = 2
     mpv_quality: str = "high"            # "low" (bilinear) or "high" (spline36 + deband)
     gallery_enabled: bool = True         # whether the bottom gallery panel is shown
+    preload_ring: int = 2                # files preloaded on each side of the active file (0 = unlimited)
 
 
 @dataclass
@@ -42,9 +43,9 @@ class AppSettings:
 
 
 _TIER_DEFAULTS = {
-    "low":    PerfSettings(thumb_max_dim=480,  thumb_jpeg_quality=4, frame_cache_size=16, preload_workers=1, frame_queue_workers=1, mpv_quality="low",  gallery_enabled=False),
-    "medium": PerfSettings(thumb_max_dim=720,  thumb_jpeg_quality=6, frame_cache_size=32, preload_workers=2, frame_queue_workers=2, mpv_quality="high", gallery_enabled=True),
-    "high":   PerfSettings(thumb_max_dim=1080, thumb_jpeg_quality=7, frame_cache_size=64, preload_workers=2, frame_queue_workers=3, mpv_quality="high", gallery_enabled=True),
+    "low":    PerfSettings(thumb_max_dim=480,  thumb_jpeg_quality=4, frame_cache_size=16, preload_workers=1, frame_queue_workers=1, mpv_quality="low",  gallery_enabled=False, preload_ring=1),
+    "medium": PerfSettings(thumb_max_dim=720,  thumb_jpeg_quality=6, frame_cache_size=32, preload_workers=2, frame_queue_workers=2, mpv_quality="high", gallery_enabled=True,  preload_ring=2),
+    "high":   PerfSettings(thumb_max_dim=1080, thumb_jpeg_quality=7, frame_cache_size=64, preload_workers=2, frame_queue_workers=3, mpv_quality="high", gallery_enabled=True,  preload_ring=4),
 }
 
 

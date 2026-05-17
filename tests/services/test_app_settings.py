@@ -69,6 +69,25 @@ def test_high_tier_defaults_enable_gallery():
     assert s.perf.mpv_quality == "high"
 
 
+def test_preload_ring_field_defaults():
+    s = PerfSettings()
+    assert s.preload_ring == 2
+
+
+def test_tier_defaults_preload_ring():
+    assert _TIER_DEFAULTS["low"].preload_ring == 1
+    assert _TIER_DEFAULTS["medium"].preload_ring == 2
+    assert _TIER_DEFAULTS["high"].preload_ring == 4
+
+
+def test_preload_ring_roundtrips_through_save_load(tmp_path):
+    p = tmp_path / "settings.json"
+    original = AppSettings(perf=PerfSettings(preload_ring=7))
+    save(original, p)
+    loaded = load(p)
+    assert loaded.perf.preload_ring == 7
+
+
 def test_save_perf_preserves_other_fields(tmp_path):
     from sub_label_pos.services.app_settings import save_perf
     p = tmp_path / "settings.json"

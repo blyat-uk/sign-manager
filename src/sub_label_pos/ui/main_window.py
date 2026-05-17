@@ -196,7 +196,19 @@ class _RichFilePreloadTask(QRunnable):
 
 
 class FolderPreloadWorker(QObject):
-    """Manages parallel file preloading using QThreadPool."""
+    """Manages parallel file preloading using QThreadPool.
+
+    When ``ring > 0``, only files within ``[active - ring, active + ring]``
+    of the currently-active file (set via :meth:`set_active_index` /
+    :meth:`set_active_path`) are queued for preload. Calling
+    ``set_active_index`` after construction shifts the ring and queues
+    any new ring members that haven't been submitted yet; in-flight
+    tasks outside the new ring are not cancelled — their results still
+    populate the cache.
+
+    When ``ring == 0`` (default), every file is queued at start — the
+    legacy behaviour.
+    """
     file_ready = pyqtSignal(str, object)  # path, PreloadedFileData
     all_done = pyqtSignal()
 
@@ -207,6 +219,7 @@ class FolderPreloadWorker(QObject):
         file_paths: list[str],
         video_service: VideoService,
         workers: int | None = None,
+        ring: int = 0,
     ):
         super().__init__()
         self._file_paths = file_paths
@@ -216,21 +229,73 @@ class FolderPreloadWorker(QObject):
         self._total = len(file_paths)
         self._completed = 0
         self._tasks: list[_RichFilePreloadTask] = []
+        self._ring = max(0, int(ring))
+        self._active_index = 0
+        self._queued: set[int] = set()
+        self._started = False
+
+    def _compute_ring_indices(self, active: int) -> set[int]:
+        """Return the set of file indices that should be preloaded for ``active``.
+
+        For ring == 0, this is every index (legacy behaviour). Otherwise
+        the window is clipped to ``[0, N-1]`` — so a click on the first
+        or last file produces an asymmetric (clipped) window rather than
+        wrapping or padding.
+        """
+        n = self._total
+        if n == 0:
+            return set()
+        if self._ring <= 0:
+            return set(range(n))
+        active = max(0, min(int(active), n - 1))
+        lo = max(0, active - self._ring)
+        hi = min(n - 1, active + self._ring)
+        return set(range(lo, hi + 1))
+
+    def _queue_indices(self, indices: set[int]) -> None:
+        """Submit any indices not already queued, in active-distance order."""
+        new = sorted(
+            (i for i in indices if i not in self._queued),
+            key=lambda i: (abs(i - self._active_index), i),
+        )
+        for i in new:
+            path = self._file_paths[i]
+            task = _RichFilePreloadTask(path, self._video_service)
+            task.signals.file_ready.connect(self.file_ready)
+            task.signals.finished.connect(self._on_task_finished)
+            self._tasks.append(task)
+            self._queued.add(i)
+            self._pool.start(task)
+
+    def set_active_index(self, index: int) -> None:
+        """Re-centre the preload ring on ``index`` and queue any new members."""
+        if self._total == 0:
+            return
+        self._active_index = max(0, min(int(index), self._total - 1))
+        if not self._started:
+            return
+        self._queue_indices(self._compute_ring_indices(self._active_index))
+
+    def set_active_path(self, path: str) -> None:
+        """Convenience: look up ``path`` in the worker's file list and re-centre."""
+        try:
+            idx = self._file_paths.index(path)
+        except ValueError:
+            return
+        self.set_active_index(idx)
 
     def start(self):
         if not self._file_paths:
             self.all_done.emit()
             return
-        for path in self._file_paths:
-            task = _RichFilePreloadTask(path, self._video_service)
-            task.signals.file_ready.connect(self.file_ready)
-            task.signals.finished.connect(self._on_task_finished)
-            self._tasks.append(task)
-            self._pool.start(task)
+        self._started = True
+        self._queue_indices(self._compute_ring_indices(self._active_index))
 
     def _on_task_finished(self):
         self._completed += 1
-        if self._completed >= self._total:
+        # all_done fires when every QUEUED task has finished, not every
+        # file in the folder — with a ring, most files are never queued.
+        if self._completed >= len(self._queued):
             self.all_done.emit()
 
     def cancel(self):
@@ -959,6 +1024,11 @@ class MainWindow(QMainWindow):
         self._folder_index = index
         path = self._folder_files[index]
         suppress = index > 0 or self._video_path is not None
+        # Re-centre the preload ring on the new active file so neighbours
+        # get queued ahead of distant files. This applies whether the
+        # current file is a cache hit or a cache miss.
+        if self._preload_worker is not None:
+            self._preload_worker.set_active_index(index)
         # Use pre-loaded data if available
         cached = self._preloaded.get(path)
         if cached:
@@ -990,7 +1060,13 @@ class MainWindow(QMainWindow):
             file_paths,
             self._video_service,
             workers=self._app_settings.perf.preload_workers,
+            ring=self._app_settings.perf.preload_ring,
         )
+        # Centre the ring on the currently-active file in the sidebar so
+        # the first file the user opens gets preloaded first, ahead of
+        # its neighbours.
+        if self._folder_index >= 0:
+            self._preload_worker.set_active_index(self._folder_index)
         self._preload_worker.file_ready.connect(self._on_file_preloaded)
         self._preload_worker.all_done.connect(self._on_preload_done)
         self._preload_worker.start()
