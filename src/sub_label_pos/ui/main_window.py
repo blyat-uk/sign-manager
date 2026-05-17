@@ -883,6 +883,8 @@ class MainWindow(QMainWindow):
         QShortcut(shortcuts.REDO_ALT_Y, self, activated=self._edit.redo)
         QShortcut(shortcuts.REDO_ALT_SHIFT_Z, self, activated=self._edit.redo)
         QShortcut(shortcuts.TOGGLE_GALLERY, self, lambda: self._gallery_btn.toggle())
+        QShortcut(shortcuts.DUPLICATE, self, lambda: self._toolbar.duplicate_clicked.emit())
+        QShortcut(shortcuts.PASTE_STYLE, self, lambda: self._toolbar.paste_style_clicked.emit())
 
         # ── Connect signals ──
 

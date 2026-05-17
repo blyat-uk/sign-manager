@@ -5,9 +5,12 @@ from typing import TYPE_CHECKING
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QWidget, QHBoxLayout, QPushButton, QLabel, QComboBox, QCheckBox,
-    QColorDialog, QInputDialog, QMenu, QWidgetAction,
+    QWidget, QHBoxLayout, QColorDialog, QInputDialog,
+    QMenu, QWidgetAction, QCheckBox, QPushButton, QFrame,
 )
+
+from sub_label_pos.ui import theme
+from sub_label_pos import shortcuts
 
 if TYPE_CHECKING:
     from sub_label_pos.model.ass_file import AssStyle, LabelDialogue
@@ -36,70 +39,6 @@ def ass_colour_to_qcolor(ass_colour: str) -> QColor:
 def qcolor_to_ass_colour(qcolor: QColor) -> str:
     """Convert QColor to &H00BBGGRR& format."""
     return f"&H00{qcolor.blue():02X}{qcolor.green():02X}{qcolor.red():02X}&"
-
-_BTN_STYLE = """
-    QPushButton {
-        background: #3a3a3a;
-        color: #ddd;
-        border: 1px solid #555;
-        border-radius: 3px;
-        padding: 2px 8px;
-        font-size: 12px;
-        min-width: 24px;
-    }
-    QPushButton:hover { background: #505050; }
-    QPushButton:pressed { background: #606060; }
-"""
-
-_ALIGN_BTN_STYLE = """
-    QPushButton {
-        background: #3a3a3a;
-        color: #ddd;
-        border: 1px solid #555;
-        border-radius: 3px;
-        padding: 2px 6px;
-        font-size: 12px;
-        min-width: 20px;
-    }
-    QPushButton:hover { background: #505050; }
-    QPushButton:pressed { background: #606060; }
-    QPushButton:checked {
-        background: #1f5fa6;
-        border-color: #4a9eff;
-        color: #fff;
-    }
-"""
-
-_SIZE_LABEL_STYLE = """
-    QLabel {
-        color: #eee;
-        font-size: 12px;
-        font-weight: bold;
-        padding: 0 4px;
-        min-width: 28px;
-    }
-"""
-
-_COMBO_STYLE = """
-    QComboBox {
-        background: #3a3a3a;
-        color: #ddd;
-        border: 1px solid #555;
-        border-radius: 3px;
-        padding: 2px 4px;
-        font-size: 11px;
-        min-width: 60px;
-        max-width: 120px;
-    }
-    QComboBox:hover { background: #505050; }
-    QComboBox::drop-down { border: none; width: 16px; }
-    QComboBox QAbstractItemView {
-        background: #3a3a3a;
-        color: #ddd;
-        selection-background-color: #1f5fa6;
-        border: 1px solid #555;
-    }
-"""
 
 
 _MENU_STYLE = """
@@ -160,134 +99,130 @@ class LabelToolbar(QWidget):
         self._store = store
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(
-            "LabelToolbar { background: #2d2d2d; border: 1px solid #555; border-radius: 4px; }"
+            f"LabelToolbar {{ background: {theme.Tokens.bg_raised}; "
+            f"border: 1px solid {theme.Tokens.border_strong}; "
+            f"border-radius: 8px; }}"
         )
         self.setVisible(False)
 
-        # Display-state mirrors of last-shown values. The toolbar derives these
-        # from store signals; outside code MUST NOT mutate them directly.
+        # Display-state mirrors — toolbar derives these from store signals;
+        # outside code MUST NOT mutate them directly.
         self._font_size = 36
         self._outline_width = 2.0
         self._primary_colour = "&H00FFFFFF&"
         self._outline_colour = "&H00000000&"
         self._current_style_name = "Label"
 
-
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 3, 4, 3)
-        layout.setSpacing(3)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(2)
 
-        self._dup_btn = self._make_btn("Dup", self.duplicate_clicked.emit)
-        self._del_btn = self._make_btn("Del", self.delete_clicked.emit)
+        # Style chip
+        self._style_chip = theme.StyleChip()
+        self._style_chip.clicked.connect(self._show_style_menu)
+        layout.addWidget(self._style_chip)
+        layout.addWidget(self._make_sep())
+
+        # Duplicate / Delete
+        self._dup_btn = theme.IconButton(
+            theme.Icons.duplicate(),
+            tooltip=f"Duplicate ({shortcuts.DUPLICATE.toString()})",
+            icon_only=True,
+        )
+        self._dup_btn.clicked.connect(self.duplicate_clicked.emit)
+        self._del_btn = theme.IconButton(
+            theme.Icons.delete(),
+            tooltip=f"Delete ({shortcuts.DELETE_SELECTED.toString()})",
+            icon_only=True,
+        )
+        self._del_btn.clicked.connect(self.delete_clicked.emit)
         layout.addWidget(self._dup_btn)
         layout.addWidget(self._del_btn)
+        layout.addWidget(self._make_sep())
 
-        # Style dropdown
-        self._sep_style = self._make_sep()
-        layout.addWidget(self._sep_style)
-        self._style_combo = QComboBox()
-        self._style_combo.setStyleSheet(_COMBO_STYLE)
-        self._style_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._style_combo.currentTextChanged.connect(self._on_style_combo_changed)
-        layout.addWidget(self._style_combo)
+        # Font size stepper
+        self._size_stepper = theme.Stepper(
+            initial=self._font_size, step=_FONT_STEP, minimum=_MIN_FONT_SIZE,
+            minus_tooltip="Decrease font size", plus_tooltip="Increase font size",
+        )
+        self._size_stepper.value_changed.connect(self._on_size_changed)
+        layout.addWidget(self._size_stepper)
+        layout.addWidget(self._make_sep())
 
-        self._sep1 = self._make_sep()
-        layout.addWidget(self._sep1)
+        # Alignment
+        self._align_seg = theme.SegmentedToggle([
+            (4, theme.Icons.align_left(), "Align left"),
+            (5, theme.Icons.align_center(), "Align center"),
+            (6, theme.Icons.align_right(), "Align right"),
+        ])
+        self._align_seg.selected.connect(lambda a: self.alignment_changed.emit(a))
+        layout.addWidget(self._align_seg)
+        layout.addWidget(self._make_sep())
 
-        self._minus_btn = self._make_btn("\u2212", self._decrease_size)
-        self._size_label = QLabel(str(self._font_size))
-        self._size_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._size_label.setStyleSheet(_SIZE_LABEL_STYLE)
-        self._plus_btn = self._make_btn("+", self._increase_size)
-        layout.addWidget(self._minus_btn)
-        layout.addWidget(self._size_label)
-        layout.addWidget(self._plus_btn)
-
-        self._sep2 = self._make_sep()
-        layout.addWidget(self._sep2)
-
-        self._align_btns: dict[int, QPushButton] = {}
-        for label_text, an_val in (("L", 4), ("C", 5), ("R", 6)):
-            btn = QPushButton(label_text)
-            btn.setStyleSheet(_ALIGN_BTN_STYLE)
-            btn.setCheckable(True)
-            btn.setAutoExclusive(True)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            btn.clicked.connect(lambda _checked, a=an_val: self.alignment_changed.emit(a))
-            layout.addWidget(btn)
-            self._align_btns[an_val] = btn
-
-        self._sep3 = self._make_sep()
-        layout.addWidget(self._sep3)
-
-        # Bold / Italic toggle buttons
-        self._bold_btn = QPushButton("B")
-        self._bold_btn.setStyleSheet(_ALIGN_BTN_STYLE)
+        # Bold / Italic
+        self._bold_btn = theme.IconButton(
+            theme.Icons.bold(),
+            tooltip=f"Bold ({shortcuts.BOLD.toString()})",
+            icon_only=True,
+        )
         self._bold_btn.setCheckable(True)
-        self._bold_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._bold_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        font = self._bold_btn.font()
-        font.setBold(True)
-        self._bold_btn.setFont(font)
         self._bold_btn.clicked.connect(lambda checked: self.bold_toggled.emit(checked))
-        layout.addWidget(self._bold_btn)
-
-        self._italic_btn = QPushButton("I")
-        self._italic_btn.setStyleSheet(_ALIGN_BTN_STYLE)
+        self._italic_btn = theme.IconButton(
+            theme.Icons.italic(),
+            tooltip=f"Italic ({shortcuts.ITALIC.toString()})",
+            icon_only=True,
+        )
         self._italic_btn.setCheckable(True)
-        self._italic_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._italic_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        font = self._italic_btn.font()
-        font.setItalic(True)
-        self._italic_btn.setFont(font)
         self._italic_btn.clicked.connect(lambda checked: self.italic_toggled.emit(checked))
+        layout.addWidget(self._bold_btn)
         layout.addWidget(self._italic_btn)
+        layout.addWidget(self._make_sep())
 
-        self._sep4 = self._make_sep()
-        layout.addWidget(self._sep4)
+        # Colors
+        self._primary_swatch = theme.ColorSwatch(tooltip="Fill color")
+        self._primary_swatch.clicked.connect(self._pick_primary_colour)
+        self._outline_swatch = theme.ColorSwatch(tooltip="Outline color")
+        self._outline_swatch.clicked.connect(self._pick_outline_colour)
+        layout.addWidget(self._primary_swatch)
+        layout.addWidget(self._outline_swatch)
+        layout.addWidget(self._make_sep())
 
-        # Primary colour swatch
-        self._primary_colour_btn = QPushButton("Fc")
-        self._primary_colour_btn.setFixedSize(24, 22)
-        self._primary_colour_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._primary_colour_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._primary_colour_btn.clicked.connect(self._pick_primary_colour)
-        layout.addWidget(self._primary_colour_btn)
+        # Outline width
+        self._outline_stepper = theme.Stepper(
+            initial=int(self._outline_width),
+            step=_OUTLINE_STEP, minimum=_MIN_OUTLINE, maximum=_MAX_OUTLINE,
+            minus_tooltip="Thinner outline", plus_tooltip="Thicker outline",
+        )
+        self._outline_stepper.value_changed.connect(
+            lambda v: self.outline_width_changed.emit(float(v))
+        )
+        layout.addWidget(self._outline_stepper)
+        layout.addWidget(self._make_sep())
 
-        # Outline colour swatch
-        self._outline_colour_btn = QPushButton("Oc")
-        self._outline_colour_btn.setFixedSize(24, 22)
-        self._outline_colour_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._outline_colour_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._outline_colour_btn.clicked.connect(self._pick_outline_colour)
-        layout.addWidget(self._outline_colour_btn)
-
-        self._sep5 = self._make_sep()
-        layout.addWidget(self._sep5)
-
-        # Outline width controls
-        self._bord_minus_btn = self._make_btn("\u2212", self._decrease_outline)
-        self._bord_label = QLabel(str(int(self._outline_width)))
-        self._bord_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._bord_label.setStyleSheet(_SIZE_LABEL_STYLE)
-        self._bord_plus_btn = self._make_btn("+", self._increase_outline)
-        layout.addWidget(self._bord_minus_btn)
-        layout.addWidget(self._bord_label)
-        layout.addWidget(self._bord_plus_btn)
-
-        self._sep6 = self._make_sep()
-        layout.addWidget(self._sep6)
-
-        self._copy_btn = self._make_btn("Copy", self._show_copy_menu)
-        self._paste_btn = self._make_btn("Paste", self.paste_style_clicked.emit)
+        # Copy / Paste style
+        self._copy_btn = theme.IconButton(
+            theme.Icons.copy_style(),
+            tooltip="Copy style…",
+            icon_only=True,
+        )
+        self._copy_btn.clicked.connect(self._show_copy_menu)
+        self._paste_btn = theme.IconButton(
+            theme.Icons.paste_style(),
+            tooltip=f"Paste style ({shortcuts.PASTE_STYLE.toString()})",
+            icon_only=True,
+        )
+        self._paste_btn.clicked.connect(self.paste_style_clicked.emit)
         layout.addWidget(self._copy_btn)
         layout.addWidget(self._paste_btn)
+        layout.addWidget(self._make_sep())
 
-        self._sep7 = self._make_sep()
-        layout.addWidget(self._sep7)
-
-        self._apply_btn = self._make_btn("Apply", self.apply_style_clicked.emit)
+        # Promote-to-style (formerly "Apply")
+        self._apply_btn = theme.IconButton(
+            theme.Icons.promote_to_style(),
+            tooltip="Promote overrides to style…",
+            icon_only=True,
+        )
+        self._apply_btn.clicked.connect(self.apply_style_clicked.emit)
         layout.addWidget(self._apply_btn)
 
         self.adjustSize()
@@ -297,37 +232,45 @@ class LabelToolbar(QWidget):
         self._store.selection_changed.connect(self._on_selection_changed)
         self._store.labels_mutated.connect(self._on_labels_mutated)
 
-    def _make_btn(self, text: str, slot) -> QPushButton:
-        btn = QPushButton(text)
-        btn.setStyleSheet(_BTN_STYLE)
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        btn.clicked.connect(slot)
-        return btn
-
-    def _make_sep(self) -> QLabel:
-        sep = QLabel("|")
-        sep.setStyleSheet("color: #666; padding: 0 2px;")
+    def _make_sep(self) -> QWidget:
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setStyleSheet(
+            f"color: {theme.Tokens.border}; max-width: 1px; min-height: 18px;"
+        )
         return sep
 
-    def _increase_size(self):
-        self._font_size += _FONT_STEP
-        self._size_label.setText(str(self._font_size))
-        self.font_size_changed.emit(self._font_size)
+    def _on_size_changed(self, v: int) -> None:
+        self._font_size = v
+        self.font_size_changed.emit(v)
 
-    def _decrease_size(self):
-        new_size = max(_MIN_FONT_SIZE, self._font_size - _FONT_STEP)
-        if new_size != self._font_size:
-            self._font_size = new_size
-            self._size_label.setText(str(self._font_size))
-            self.font_size_changed.emit(self._font_size)
+    def _show_style_menu(self) -> None:
+        """QMenu-driven style picker. Replaces the old QComboBox."""
+        menu = QMenu(self)
+        menu.setStyleSheet(_MENU_STYLE)
+        for name in self._store.state.styles.keys():
+            menu.addAction(name, lambda n=name: self._on_style_picked(n))
+        menu.addSeparator()
+        menu.addAction("Add new…", self._on_create_new_style)
+        menu.exec(self._style_chip.mapToGlobal(self._style_chip.rect().bottomLeft()))
 
+    def _on_style_picked(self, name: str) -> None:
+        self._current_style_name = name
+        self._style_chip.set_style_name(name)
+        self.style_changed.emit(name)
+
+    def _on_create_new_style(self) -> None:
+        name, ok = QInputDialog.getText(self, "New Style", "Style name:")
+        if ok and name.strip():
+            self.create_style_requested.emit(name.strip())
+
+    # --- color pickers ---
     def _pick_primary_colour(self):
         initial = ass_colour_to_qcolor(self._primary_colour)
         colour = QColorDialog.getColor(initial, self, "Primary Colour")
         if colour.isValid():
             self._primary_colour = qcolor_to_ass_colour(colour)
-            self._update_colour_btn(self._primary_colour_btn, colour)
+            self._primary_swatch.set_color(colour)
             self.primary_colour_changed.emit(self._primary_colour)
 
     def _pick_outline_colour(self):
@@ -335,47 +278,8 @@ class LabelToolbar(QWidget):
         colour = QColorDialog.getColor(initial, self, "Outline Colour")
         if colour.isValid():
             self._outline_colour = qcolor_to_ass_colour(colour)
-            self._update_colour_btn(self._outline_colour_btn, colour)
+            self._outline_swatch.set_color(colour)
             self.outline_colour_changed.emit(self._outline_colour)
-
-    def _increase_outline(self):
-        new_width = min(_MAX_OUTLINE, self._outline_width + _OUTLINE_STEP)
-        if new_width != self._outline_width:
-            self._outline_width = new_width
-            self._bord_label.setText(str(int(self._outline_width)))
-            self.outline_width_changed.emit(self._outline_width)
-
-    def _decrease_outline(self):
-        new_width = max(_MIN_OUTLINE, self._outline_width - _OUTLINE_STEP)
-        if new_width != self._outline_width:
-            self._outline_width = new_width
-            self._bord_label.setText(str(int(self._outline_width)))
-            self.outline_width_changed.emit(self._outline_width)
-
-    def _update_colour_btn(self, btn: QPushButton, colour: QColor):
-        luma = 0.299 * colour.red() + 0.587 * colour.green() + 0.114 * colour.blue()
-        text_colour = "#000" if luma > 128 else "#fff"
-        btn.setStyleSheet(
-            f"QPushButton {{ background: {colour.name()}; color: {text_colour}; "
-            f"border: 1px solid #555; border-radius: 3px; font-size: 10px; }}"
-            f"QPushButton:hover {{ border-color: #aaa; }}"
-        )
-
-    def _on_style_combo_changed(self, text: str):
-        if text == "Add new...":
-            name, ok = QInputDialog.getText(self, "New Style", "Style name:")
-            if ok and name.strip():
-                self.create_style_requested.emit(name.strip())
-            # Reset combo to the previous style
-            self._style_combo.blockSignals(True)
-            idx = self._style_combo.findText(self._current_style_name)
-            if idx >= 0:
-                self._style_combo.setCurrentIndex(idx)
-            self._style_combo.blockSignals(False)
-            return
-        if text:
-            self._current_style_name = text
-            self.style_changed.emit(text)
 
     def _show_copy_menu(self):
         menu = QMenu(self)
@@ -556,26 +460,19 @@ class LabelToolbar(QWidget):
         else:
             self._set_outline_width_display(owidth)
 
-        # Style dropdown: always populated; selected entry is the first label's
-        # style (multi-select shows the first label's style by convention —
-        # the dropdown is not a "mixed" indicator).
+        # Style chip: always populated; selected entry is the first label's
+        # style (multi-select shows the first label's style by convention).
         self._set_styles_display(list(styles.keys()), first.style_name)
 
     # --- Display setters (None == "mixed / unknown") -------------------
 
     def _set_font_size_display(self, value: int | None) -> None:
-        if value is None:
-            self._size_label.setText("-")
-        else:
+        self._size_stepper.set_value(value)
+        if value is not None:
             self._font_size = value
-            self._size_label.setText(str(value))
 
     def _set_alignment_display(self, alignment: int | None) -> None:
-        effective = alignment if alignment in (4, 5, 6) else None
-        for an, btn in self._align_btns.items():
-            btn.blockSignals(True)
-            btn.setChecked(an == effective)
-            btn.blockSignals(False)
+        self._align_seg.set_selected(alignment if alignment in (4, 5, 6) else None)
 
     def _set_bold_display(self, bold: bool | None) -> None:
         self._bold_btn.blockSignals(True)
@@ -589,43 +486,26 @@ class LabelToolbar(QWidget):
 
     def _set_primary_colour_display(self, colour: str | None) -> None:
         if colour is None:
-            # Mixed: neutral grey swatch
-            self._primary_colour_btn.setStyleSheet(
-                "QPushButton { background: #555; color: #ddd; border: 1px solid #555;"
-                " border-radius: 3px; font-size: 10px; }"
-            )
+            self._primary_swatch.set_color(None)
             return
         self._primary_colour = colour
-        self._update_colour_btn(self._primary_colour_btn, ass_colour_to_qcolor(colour))
+        self._primary_swatch.set_color(ass_colour_to_qcolor(colour))
 
     def _set_outline_colour_display(self, colour: str | None) -> None:
         if colour is None:
-            self._outline_colour_btn.setStyleSheet(
-                "QPushButton { background: #555; color: #ddd; border: 1px solid #555;"
-                " border-radius: 3px; font-size: 10px; }"
-            )
+            self._outline_swatch.set_color(None)
             return
         self._outline_colour = colour
-        self._update_colour_btn(self._outline_colour_btn, ass_colour_to_qcolor(colour))
+        self._outline_swatch.set_color(ass_colour_to_qcolor(colour))
 
     def _set_outline_width_display(self, width: float | None) -> None:
-        if width is None:
-            self._bord_label.setText("-")
-        else:
+        self._outline_stepper.set_value(int(width) if width is not None else None)
+        if width is not None:
             self._outline_width = width
-            self._bord_label.setText(str(int(width)))
 
     def _set_styles_display(self, available_styles: list[str], current: str) -> None:
         self._current_style_name = current
-        self._style_combo.blockSignals(True)
-        self._style_combo.clear()
-        if available_styles:
-            self._style_combo.addItems(available_styles)
-        self._style_combo.addItem("Add new...")
-        idx = self._style_combo.findText(current)
-        if idx >= 0:
-            self._style_combo.setCurrentIndex(idx)
-        self._style_combo.blockSignals(False)
+        self._style_chip.set_style_name(current)
 
     # --- Geometry placement (called by parent after layout) -----------
 
