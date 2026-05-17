@@ -1463,6 +1463,8 @@ class MainWindow(QMainWindow):
         n_labels = len(self._store.state.labels) if self._store.state else 0
         n_groups = len(self._groups) if hasattr(self, "_groups") else 0
         self._sb_counts.set_text(f"{n_labels} labels · {n_groups} groups")
+        if hasattr(self, "_gallery_handle"):
+            self._gallery_handle.set_counts(n_groups, n_labels)
 
     def _update_status_resolution(self) -> None:
         if self._ass is not None and hasattr(self._ass, "play_res_x"):
