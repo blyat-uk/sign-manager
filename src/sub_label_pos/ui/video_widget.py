@@ -340,6 +340,10 @@ class VideoFrameWidget(QWidget):
         self._drag_chip = _theme.DragChip(parent=self)
         self._drag_press_pos: "QPoint | None" = None  # widget-px position where drag started
 
+        # Group badge: 'N selected' pill shown during multi-select (Task 18).
+        self._group_badge = _theme.GroupBadge(parent=self)
+        self._group_badge.hide()
+
     def set_ass(self, ass: AssFile | None):
         self._ass = ass
         self._font_corrections.clear()
@@ -1242,6 +1246,38 @@ class VideoFrameWidget(QWidget):
                     pen = QPen(QColor(0, 180, 255, 180), 1, Qt.PenStyle.DashLine)
                 painter.setPen(pen)
                 painter.drawLine(p1, p2)
+
+        # Multi-select group bbox + badge (Task 18)
+        selected_ids = list(self._store.selected)
+        if len(selected_ids) > 1:
+            rects: list[QRectF] = []
+            for lid in selected_ids:
+                lb = self._store.state.labels.get(lid)
+                if lb is None:
+                    continue
+                r = self._label_rects.get(lb.line_index)
+                if r is not None:
+                    rects.append(r)
+            if rects:
+                union = rects[0]
+                for r in rects[1:]:
+                    union = union.united(r)
+                pen = QPen(QColor(74, 158, 255, 179), 1.5, Qt.PenStyle.DashLine)
+                painter.setPen(pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(union)
+                # Position the GroupBadge at the bbox top-left, just above
+                self._group_badge.set_count(len(selected_ids))
+                badge_h = self._group_badge.height()
+                self._group_badge.move(
+                    max(0, int(union.left()) - 2),
+                    max(0, int(union.top()) - badge_h - 4),
+                )
+                self._group_badge.show()
+            else:
+                self._group_badge.hide()
+        else:
+            self._group_badge.hide()
 
         # Hover outline (Task 17) — drawn last so it sits on top of label paint.
         # Hidden when the hovered label is part of the active selection (the
