@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
 )
 
-from sub_label_pos.model.label_rows import LabelGroupRow
+from sub_label_pos.model.label_rows import LabelGroupRow, group_labels_by_exact_timing
 from sub_label_pos.ui import theme
 
 if TYPE_CHECKING:
@@ -228,9 +228,119 @@ class LabelsSidebar(QWidget):
         self._list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         outer.addWidget(self._list, 1)
 
+        # Subscribe to store signals.
+        self._store.file_loaded.connect(self._on_file_loaded)
+        self._store.labels_mutated.connect(self._on_labels_mutated)
+        self._store.selection_changed.connect(self._on_selection_changed)
+
     def set_dirty_ids(self, ids: set["LabelId"]) -> None:
         """Caller informs us which labels are unsaved. Triggers row repaint."""
         self._dirty_ids = set(ids)
         # Row widgets re-read dirty state on the next rebuild; for now just
         # mark pending. (Task 7 wires the per-row repaint.)
         self._rebuild_pending = True
+
+    # ── Public API ──────────────────────────────────────────────────────
+
+    def mark_clean(self) -> None:
+        """Caller informs us all labels are now saved-state. Drops the
+        accumulated dirty set and repaints all rows.
+        """
+        if not self._dirty_ids:
+            return
+        self._dirty_ids = set()
+        self._refresh_dirty_state()
+
+    # ── Internal ────────────────────────────────────────────────────────
+
+    def _on_file_loaded(self, _path) -> None:
+        self._dirty_ids = set()
+        self._rebuild_pending = True
+        if self.isVisible():
+            self._rebuild()
+
+    def _on_labels_mutated(self, ids: set) -> None:
+        # Accumulate dirty ids and schedule a rebuild (grouping may have
+        # changed if timing was edited).
+        self._dirty_ids |= set(ids)
+        self._rebuild_pending = True
+        if self.isVisible():
+            self._rebuild()
+
+    def _on_selection_changed(self, selected: set) -> None:
+        self._refresh_active_row(selected)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._rebuild_pending:
+            self._rebuild()
+
+    def _rebuild(self) -> None:
+        """Recompute groups from the current store state and populate the list."""
+        from PyQt6.QtCore import QSize
+        from PyQt6.QtWidgets import QListWidgetItem
+
+        self._rebuild_pending = False
+        self._list.clear()
+
+        labels = list(self._store.state.labels.values()) if self._store.state else []
+        # Stable: sort by line_index first so identical-timing groups preserve
+        # file order; group_labels_by_exact_timing keeps insertion order within
+        # a group.
+        labels.sort(key=lambda lb: lb.line_index)
+        self._rows = group_labels_by_exact_timing(labels)
+        self._count_label.setText(f"· {len(labels)}")
+
+        search_term = self._search.text().strip().lower()
+        for row in self._rows:
+            widget = _RowWidget(row)
+            widget.set_dirty(any(
+                getattr(lb, "label_id", None) in self._dirty_ids for lb in row.labels
+            ))
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(0, widget.sizeHint().height()))
+            self._list.addItem(item)
+            self._list.setItemWidget(item, widget)
+            if search_term:
+                hit = any(search_term in lb.text.lower() for lb in row.labels)
+                item.setHidden(not hit)
+
+        if search_term:
+            visible = sum(1 for i in range(self._list.count()) if not self._list.item(i).isHidden())
+            self._count_label.setText(f"· {visible} / {len(labels)}")
+
+        # Re-apply active highlight after rebuild.
+        self._refresh_active_row(self._store.selected)
+
+    def _refresh_active_row(self, selected: set) -> None:
+        """Find the row whose group contains any selected label-id; mark active."""
+        target_index = -1
+        if selected:
+            sel_ids = set(selected)
+            for i, row in enumerate(self._rows):
+                if any(
+                    getattr(lb, "label_id", None) in sel_ids for lb in row.labels
+                ):
+                    target_index = i
+                    break
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            widget = self._list.itemWidget(item)
+            if widget is not None:
+                widget.set_active(i == target_index)
+        if target_index >= 0:
+            self._list.scrollToItem(
+                self._list.item(target_index),
+                self._list.ScrollHint.EnsureVisible,
+            )
+
+    def _refresh_dirty_state(self) -> None:
+        """Re-apply the dirty flag to each visible row widget without rebuilding."""
+        for i, row in enumerate(self._rows):
+            widget = self._list.itemWidget(self._list.item(i))
+            if widget is None:
+                continue
+            dirty = any(
+                getattr(lb, "label_id", None) in self._dirty_ids for lb in row.labels
+            )
+            widget.set_dirty(dirty)
