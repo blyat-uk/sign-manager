@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import glob
 import itertools
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 from PyQt6.QtCore import Qt, QPointF, QRectF, QThread, pyqtSignal, QObject, QThreadPool, QRunnable, QSettings, QSize
 from PyQt6.QtGui import QAction, QColor, QCursor, QKeySequence, QDragEnterEvent, QDropEvent, QShortcut, QCloseEvent, QImage, QFont
@@ -38,6 +41,7 @@ from sub_label_pos.model.ass_file import (
 )
 from sub_label_pos.model.groups import DerivedGroupModel
 from sub_label_pos.model.label_store import LabelStore
+from sub_label_pos.services.app_settings import load as load_settings
 from sub_label_pos.services.exceptions import VideoServiceError
 from sub_label_pos.services.ffmpeg_service import FFmpegVideoService
 from sub_label_pos.services.frame_cache import FrameCache
@@ -192,14 +196,19 @@ class FolderPreloadWorker(QObject):
     file_ready = pyqtSignal(str, object)  # path, PreloadedFileData
     all_done = pyqtSignal()
 
-    _POOL_SIZE = 5
+    _DEFAULT_POOL_SIZE = 5
 
-    def __init__(self, file_paths: list[str], video_service: VideoService):
+    def __init__(
+        self,
+        file_paths: list[str],
+        video_service: VideoService,
+        workers: int | None = None,
+    ):
         super().__init__()
         self._file_paths = file_paths
         self._video_service = video_service
         self._pool = QThreadPool()
-        self._pool.setMaxThreadCount(self._POOL_SIZE)
+        self._pool.setMaxThreadCount(workers or self._DEFAULT_POOL_SIZE)
         self._total = len(file_paths)
         self._completed = 0
         self._tasks: list[_RichFilePreloadTask] = []
@@ -374,11 +383,28 @@ class MainWindow(QMainWindow):
         self.resize(1280, 720)
         self.setAcceptDrops(True)
 
+        # Load persisted perf settings (runs first-run hardware detection if
+        # no settings file exists). Drives FrameCache size, FrameRequestQueue
+        # worker count, and gallery thumbnail dimensions/quality below.
+        self._app_settings = load_settings()
+        perf = self._app_settings.perf
+        log.info(
+            "perf tier=%s (RAM=%.1f GB, cores=%d): "
+            "thumb_max=%d q=%d cache=%d preload=%d queue=%d",
+            self._app_settings.hardware_tier,
+            self._app_settings.detected_ram_gb,
+            self._app_settings.detected_cpu_cores,
+            perf.thumb_max_dim, perf.thumb_jpeg_quality, perf.frame_cache_size,
+            perf.preload_workers, perf.frame_queue_workers,
+        )
+
         # Video service stack (frame extraction + LRU cache + async queue)
         self._video_service: VideoService = CachedVideoService(
-            FFmpegVideoService(), FrameCache(max_size=64),
+            FFmpegVideoService(), FrameCache(max_size=perf.frame_cache_size),
         )
-        self._frame_queue = FrameRequestQueue(self._video_service, workers=2)
+        self._frame_queue = FrameRequestQueue(
+            self._video_service, workers=perf.frame_queue_workers
+        )
 
         # FileLoader handles the "load one video + its sidecar ASS" primitive
         # on a worker thread. MainWindow only orchestrates higher-level
@@ -471,6 +497,8 @@ class MainWindow(QMainWindow):
             store=self._store,
             groups=self._groups_model,
             video_service=self._video_service,
+            thumb_max_dim=perf.thumb_max_dim,
+            thumb_jpeg_quality=perf.thumb_jpeg_quality,
         )
         self._timeline = TimelineWidget(groups=self._groups_model)
 
@@ -933,7 +961,11 @@ class MainWindow(QMainWindow):
     # ── Folder pre-loading ──
 
     def _start_folder_preload(self, file_paths: list[str]) -> None:
-        self._preload_worker = FolderPreloadWorker(file_paths, self._video_service)
+        self._preload_worker = FolderPreloadWorker(
+            file_paths,
+            self._video_service,
+            workers=self._app_settings.perf.preload_workers,
+        )
         self._preload_worker.file_ready.connect(self._on_file_preloaded)
         self._preload_worker.all_done.connect(self._on_preload_done)
         self._preload_worker.start()

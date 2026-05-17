@@ -469,6 +469,9 @@ class GalleryPanel(QWidget):
         groups: DerivedGroupModel,
         video_service: VideoService,
         parent=None,
+        *,
+        thumb_max_dim: int = 720,
+        thumb_jpeg_quality: int = 6,
     ):
         super().__init__(parent)
         self.setFixedHeight(_GALLERY_H)
@@ -477,6 +480,8 @@ class GalleryPanel(QWidget):
         self._store = store
         self._groups_model = groups
         self._video_service = video_service
+        self._thumb_max_dim = thumb_max_dim
+        self._thumb_jpeg_quality = thumb_jpeg_quality
         self._thumbnails: list[GalleryThumbnail] = []
         # Legacy LabelGroup adapter list (built from model groups). One per
         # current thumbnail; mirrors model_groups index-for-index.
@@ -713,9 +718,8 @@ class GalleryPanel(QWidget):
             self._font_correction,
             styles=dict(self._ass.styles),
             font_corrections=dict(getattr(self, '_font_corrections', {})),
-            # Hardcoded for now; Pass 3 will read these from settings.
-            thumb_max_dim=720,
-            thumb_jpeg_quality=6,
+            thumb_max_dim=self._thumb_max_dim,
+            thumb_jpeg_quality=self._thumb_jpeg_quality,
         )
         # Parent thread to self so Qt owns it; PyQt won't garbage-collect
         # while the underlying OS thread is still running. deleteLater on
@@ -794,9 +798,8 @@ class GalleryPanel(QWidget):
             self._font_correction,
             styles=dict(self._ass.styles),
             font_corrections=dict(getattr(self, '_font_corrections', {})),
-            # Hardcoded for now; Pass 3 will read these from settings.
-            thumb_max_dim=720,
-            thumb_jpeg_quality=6,
+            thumb_max_dim=self._thumb_max_dim,
+            thumb_jpeg_quality=self._thumb_jpeg_quality,
         )
         self._single_thread = QThread(self)
         self._single_worker.moveToThread(self._single_thread)
