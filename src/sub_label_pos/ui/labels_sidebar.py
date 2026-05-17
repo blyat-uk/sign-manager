@@ -218,6 +218,8 @@ class LabelsSidebar(QWidget):
         sl.addWidget(self._search)
         outer.addWidget(self._search_wrap)
 
+        self._search.textChanged.connect(self._on_search_changed)
+
         # List
         self._list = QListWidget()
         self._list.setStyleSheet(
@@ -269,6 +271,27 @@ class LabelsSidebar(QWidget):
 
     def _on_selection_changed(self, selected: set) -> None:
         self._refresh_active_row(selected)
+
+    def _on_search_changed(self, _text: str) -> None:
+        """Hide rows that don't contain the search term in any label's text."""
+        search_term = self._search.text().strip().lower()
+        visible = 0
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            row = self._rows[i]
+            if not search_term:
+                item.setHidden(False)
+                visible += 1
+            else:
+                hit = any(search_term in lb.text.lower() for lb in row.labels)
+                item.setHidden(not hit)
+                if hit:
+                    visible += 1
+        total = sum(len(r.labels) for r in self._rows)
+        if search_term:
+            self._count_label.setText(f"· {visible} / {total}")
+        else:
+            self._count_label.setText(f"· {total}")
 
     def showEvent(self, event):
         super().showEvent(event)
