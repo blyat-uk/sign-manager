@@ -236,6 +236,16 @@ class LabelsSidebar(QWidget):
         self._list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         outer.addWidget(self._list, 1)
 
+        # Empty-state overlay (no labels / no matches / no file).
+        self._empty_label = QLabel("", parent=self._list)
+        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_label.setWordWrap(True)
+        self._empty_label.setStyleSheet(
+            f"color: {theme.Tokens.text_muted}; font-size: 11px; "
+            f"padding: 30px 24px; background: transparent;"
+        )
+        self._empty_label.hide()
+
         # Subscribe to store signals.
         self._store.file_loaded.connect(self._on_file_loaded)
         self._store.labels_mutated.connect(self._on_labels_mutated)
@@ -298,6 +308,7 @@ class LabelsSidebar(QWidget):
             self._count_label.setText(f"· {visible} / {total}")
         else:
             self._count_label.setText(f"· {total}")
+        self._update_empty_state()
 
     def _row_for_item(self, item) -> LabelGroupRow | None:
         if item is None:
@@ -351,6 +362,11 @@ class LabelsSidebar(QWidget):
         if self._rebuild_pending:
             self._rebuild()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Re-anchor the empty-state overlay over the list.
+        self._empty_label.setGeometry(self._list.geometry())
+
     def _rebuild(self) -> None:
         """Recompute groups from the current store state and populate the list."""
         from PyQt6.QtCore import QSize
@@ -387,6 +403,7 @@ class LabelsSidebar(QWidget):
 
         # Re-apply active highlight after rebuild.
         self._refresh_active_row(self._store.selected)
+        self._update_empty_state()
 
     def _refresh_active_row(self, selected: set) -> None:
         """Find the row whose group contains any selected label-id; mark active."""
@@ -420,3 +437,26 @@ class LabelsSidebar(QWidget):
                 getattr(lb, "label_id", None) in self._dirty_ids for lb in row.labels
             )
             widget.set_dirty(dirty)
+
+    def _update_empty_state(self) -> None:
+        labels_total = sum(len(r.labels) for r in self._rows)
+        search_term = self._search.text().strip()
+        has_file = self._store.state is not None and bool(self._store.state.labels)
+
+        if not has_file and not self._rows:
+            self._empty_label.setText("Open a video to see its labels.")
+            self._empty_label.show()
+            return
+        if labels_total == 0:
+            self._empty_label.setText("No labels in this file.")
+            self._empty_label.show()
+            return
+        if search_term:
+            visible = sum(
+                1 for i in range(self._list.count()) if not self._list.item(i).isHidden()
+            )
+            if visible == 0:
+                self._empty_label.setText(f"No matches for \"{search_term}\".")
+                self._empty_label.show()
+                return
+        self._empty_label.hide()
