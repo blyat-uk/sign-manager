@@ -36,6 +36,9 @@ ITALIC = QKeySequence(QKeySequence.StandardKey.Italic)     # Ctrl+I
 # Gallery toggle
 TOGGLE_GALLERY = QKeySequence(Qt.Key.Key_G)
 
+# Labels sidebar toggle
+TOGGLE_LABELS_SIDEBAR = QKeySequence(Qt.Key.Key_L)
+
 # Per-label clipboard
 DUPLICATE = QKeySequence("Ctrl+D")
 PASTE_STYLE = QKeySequence("Ctrl+Shift+V")
