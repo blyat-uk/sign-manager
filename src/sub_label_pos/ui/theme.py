@@ -162,6 +162,10 @@ class Icons:
         return cls._i("ph.list", color)
 
     @classmethod
+    def labels_sidebar_toggle(cls, color: str | None = None) -> QIcon:
+        return cls._i("ph.list-bullets", color)
+
+    @classmethod
     def settings(cls, color: str | None = None) -> QIcon:
         return cls._i("ph.gear", color)
 
