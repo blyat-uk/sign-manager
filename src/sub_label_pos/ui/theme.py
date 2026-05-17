@@ -799,6 +799,9 @@ class RecentItemWidget(QWidget):
         parent=None,
     ):
         super().__init__(parent)
+        # Let mouse events pass through to the parent QListWidget so item
+        # clicks/double-clicks register as list activations.
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         outer = QHBoxLayout(self)
         outer.setContentsMargins(14, 11, 14, 11)
         outer.setSpacing(12)
