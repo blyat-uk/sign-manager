@@ -12,9 +12,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from PyQt6.QtCore import Qt, pyqtSignal, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer
 from PyQt6.QtGui import QIcon, QColor, QPainter
-from PyQt6.QtWidgets import QPushButton, QWidget, QHBoxLayout, QLabel, QFrame
+from PyQt6.QtWidgets import QPushButton, QWidget, QHBoxLayout, QVBoxLayout, QLabel, QFrame
 import qtawesome as qta
 
 
@@ -633,3 +633,154 @@ class StyleChip(QPushButton):
 
     def set_style_name(self, name: str) -> None:
         self.setText(f"{name} ▾")
+
+
+class LoadingPill(QWidget):
+    """Corner overlay shown during slow async work. Pulsing dot + label."""
+
+    def __init__(self, text: str = "Loading frame", *, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 5, 10, 5)
+        layout.setSpacing(6)
+
+        self._dot = QLabel()
+        self._dot.setFixedSize(8, 8)
+        self._text = QLabel(text)
+
+        layout.addWidget(self._dot)
+        layout.addWidget(self._text)
+
+        self.setStyleSheet(
+            f"LoadingPill {{ background: rgba(0,0,0,0.75); border: 1px solid #333; "
+            f"border-radius: 12px; }}"
+            f"QLabel {{ color: {Tokens.text_primary}; font-size: 10.5px; "
+            f"background: transparent; }}"
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        self._dot_visible = True
+        self._timer = QTimer(self)
+        self._timer.setInterval(450)
+        self._timer.timeout.connect(self._toggle_dot)
+        self._update_dot()
+        self.hide()
+
+    def _toggle_dot(self):
+        self._dot_visible = not self._dot_visible
+        self._update_dot()
+
+    def _update_dot(self):
+        color = Tokens.accent if self._dot_visible else Tokens.bg_raised
+        self._dot.setStyleSheet(f"background: {color}; border-radius: 4px;")
+
+    def set_text(self, text: str) -> None:
+        self._text.setText(text)
+
+    def start(self):
+        self._timer.start()
+        self.show()
+        self.adjustSize()
+
+    def stop(self):
+        self._timer.stop()
+        self.hide()
+
+
+class DragChip(QWidget):
+    """Floating x/y readout shown during an active drag.
+
+    Layout:
+      x  960  +12
+      y  648  −4
+      [snap]  snapped to Title       (only when snapped)
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(9, 6, 9, 6)
+        layout.setSpacing(2)
+
+        self._x_label = QLabel("x  0  +0")
+        self._y_label = QLabel("y  0  +0")
+        self._snap_label = QLabel("")
+        self._snap_label.hide()
+
+        layout.addWidget(self._x_label)
+        layout.addWidget(self._y_label)
+        layout.addWidget(self._snap_label)
+
+        self.setStyleSheet(
+            f"DragChip {{ background: {Tokens.overlay}; border: 1px solid {Tokens.accent}; "
+            f"border-radius: 5px; }}"
+            f"QLabel {{ color: {Tokens.text_emphasis}; font-size: 10.5px; "
+            f"background: transparent; }}"
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.hide()
+
+    def update_position(self, x: int, y: int, dx: int, dy: int) -> None:
+        def fmt(v: int) -> str:
+            return f"+{v}" if v >= 0 else f"−{abs(v)}"
+
+        self._x_label.setText(
+            f'<span style="color:{Tokens.text_muted};">x</span> '
+            f'<span style="color:{Tokens.text_emphasis};">{x}</span> '
+            f'<span style="color:{Tokens.alert};font-size:9.5px;">{fmt(dx)}</span>'
+        )
+        self._y_label.setText(
+            f'<span style="color:{Tokens.text_muted};">y</span> '
+            f'<span style="color:{Tokens.text_emphasis};">{y}</span> '
+            f'<span style="color:{Tokens.alert};font-size:9.5px;">{fmt(dy)}</span>'
+        )
+
+    def set_snap_target(self, target_name: str | None) -> None:
+        if not target_name:
+            self._snap_label.hide()
+        else:
+            self._snap_label.setText(
+                f'<span style="color:{Tokens.alert};">⊙</span> '
+                f'<span style="color:{Tokens.alert};">snapped to</span> '
+                f'<span style="color:{Tokens.text_emphasis};">{target_name}</span>'
+            )
+            self._snap_label.show()
+        self.adjustSize()
+
+
+class GroupBadge(QLabel):
+    """'N selected' pill anchored to multi-select group bbox."""
+
+    def __init__(self, parent=None):
+        super().__init__("", parent)
+        self.setFixedHeight(18)
+        self.setStyleSheet(
+            f"GroupBadge {{ background: {Tokens.accent}; color: {Tokens.text_emphasis}; "
+            f"font-size: 9.5px; font-weight: 700; padding: 2px 7px; border-radius: 8px; "
+            f"letter-spacing: 0.3px; }}"
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.hide()
+
+    def set_count(self, n: int) -> None:
+        self.setText(f"❖ {n} selected")
+        self.adjustSize()
+        self.show()
+
+
+class SnapLabel(QLabel):
+    """Yellow pill anchored to a snap guide line: 'aligned to Title'."""
+
+    def __init__(self, parent=None):
+        super().__init__("", parent)
+        self.setStyleSheet(
+            f"SnapLabel {{ background: {Tokens.alert}; color: {Tokens.bg_deepest}; "
+            f"font-size: 9.5px; font-weight: 600; padding: 1px 6px; border-radius: 3px; }}"
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.hide()
+
+    def set_target(self, target_name: str) -> None:
+        self.setText(f"aligned to {target_name}")
+        self.adjustSize()
+        self.show()

@@ -122,3 +122,42 @@ def test_style_chip_renames(qapp):
     chip = theme.StyleChip()
     chip.set_style_name("Caption")
     assert chip.text() == "Caption ▾"
+
+
+def test_loading_pill_start_stop(qapp):
+    pill = theme.LoadingPill()
+    assert not pill.isVisible()
+    pill.start()
+    assert pill.isVisible()
+    pill.stop()
+    assert not pill.isVisible()
+
+
+def test_drag_chip_position_and_snap(qapp):
+    chip = theme.DragChip()
+    chip.show()  # Parent must be shown for child visibility to work
+    chip.update_position(960, 648, 12, -4)
+    assert "960" in chip._x_label.text()
+    assert "648" in chip._y_label.text()
+    assert not chip._snap_label.isVisible()
+    chip.set_snap_target("Title")
+    assert chip._snap_label.isVisible()
+    assert "Title" in chip._snap_label.text()
+    chip.set_snap_target(None)
+    assert not chip._snap_label.isVisible()
+
+
+def test_group_badge_set_count(qapp):
+    badge = theme.GroupBadge()
+    assert not badge.isVisible()
+    badge.set_count(3)
+    assert badge.isVisible()
+    assert "3 selected" in badge.text()
+
+
+def test_snap_label_set_target(qapp):
+    label = theme.SnapLabel()
+    assert not label.isVisible()
+    label.set_target("Title")
+    assert label.isVisible()
+    assert "Title" in label.text()
