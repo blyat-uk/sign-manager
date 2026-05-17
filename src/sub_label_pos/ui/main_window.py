@@ -32,6 +32,8 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QCheckBox,
     QComboBox,
+    QToolButton,
+    QSizePolicy,
 )
 
 from sub_label_pos.model.ass_file import (
@@ -62,6 +64,8 @@ from sub_label_pos.ui.video_widget import VideoFrameWidget
 from sub_label_pos.ui.gallery_widget import GalleryPanel, LabelGroup, compute_label_groups, _crop_to_labels_image, _best_representative_time
 from sub_label_pos.ui.label_toolbar import LabelToolbar
 from sub_label_pos.ui.timeline_widget import TimelineWidget
+from sub_label_pos.ui import theme
+from sub_label_pos.ui.settings_dialog import SettingsDialog
 
 _VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".webm"}
 
@@ -449,6 +453,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Sub Label Pos")
+        self.menuBar().hide()
         self.resize(1280, 720)
         self.setAcceptDrops(True)
 
@@ -561,6 +566,7 @@ class MainWindow(QMainWindow):
         # ``mpv/hwdec`` lives in QSettings (hardware-policy, per-machine).
         # ``mpv_quality`` lives in PerfSettings (tier-aware, persisted there).
         _init_settings = QSettings("SubLabelPos", "SubLabelPos")
+        self._init_settings = _init_settings
         self._mpv_widget._hwdec = _init_settings.value("mpv/hwdec", "auto-safe")
         self._mpv_widget._hq = (self._app_settings.perf.mpv_quality == "high")
         self._player = VideoFrameWidget(
@@ -618,84 +624,124 @@ class MainWindow(QMainWindow):
         # only routes the user-driven button actions.
         self._toolbar = LabelToolbar(self._store, parent=self._player)
 
-        # Menu bar (currently only holds rarely-used settings actions)
-        menu_settings = self.menuBar().addMenu("&Settings")
-        menu_settings.addAction("Re-detect Hardware…", self._on_redetect_hardware)
+        # Apply initial gallery visibility from display settings.
+        self._gallery.setVisible(self._app_settings.display.gallery_visible)
 
-        # Gallery visibility toggle (tier-aware default lives in PerfSettings).
-        self._show_gallery_action = QAction("Show Gallery", self)
-        self._show_gallery_action.setCheckable(True)
-        self._show_gallery_action.setChecked(self._app_settings.perf.gallery_enabled)
-        self._show_gallery_action.toggled.connect(self._on_show_gallery_toggled)
-        menu_settings.addAction(self._show_gallery_action)
-
-        # Apply initial visibility (default-True on medium/high, default-False on low).
-        self._gallery.setVisible(self._app_settings.perf.gallery_enabled)
-
-        # Main toolbar
+        # --- Main toolbar ---
         self._main_tb = QToolBar("Main")
         self._main_tb.setMovable(False)
+        self._main_tb.setIconSize(QSize(18, 18))
+        self._main_tb.setStyleSheet(
+            f"QToolBar {{ background: {theme.Tokens.bg_raised}; "
+            f"border-bottom: 1px solid {theme.Tokens.border}; "
+            f"padding: 4px 8px; spacing: 4px; }}"
+        )
         self.addToolBar(self._main_tb)
-        self._main_tb.addAction("Open Video", self._open_video)
-        self._main_tb.addAction("Open Folder", self._open_folder)
+
+        # Open (split-button menu)
+        open_btn = QToolButton()
+        open_btn.setIcon(theme.Icons.open_folder())
+        open_btn.setText("Open")
+        open_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        open_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        open_btn.setToolTip("Open video, folder, or ASS")
+        open_menu = QMenu(open_btn)
+        open_menu.addAction("Open video…", self._open_video)
+        open_menu.addAction("Open folder…", self._open_folder)
+        open_menu.addAction("Open ASS only…", self._open_ass)
+        open_btn.setMenu(open_menu)
+        open_btn.clicked.connect(self._open_video)  # default action
+        self._main_tb.addWidget(open_btn)
+
+        # Save (primary)
+        self._save_btn = theme.PrimaryButton(
+            "Save", icon=theme.Icons.save(),
+            tooltip=f"Save ({shortcuts.SAVE.toString()})",
+        )
+        self._save_btn.clicked.connect(self._save_ass)
+        self._main_tb.addWidget(self._save_btn)
+
         self._main_tb.addSeparator()
-        self._main_tb.addAction("Open ASS", self._open_ass)
-        self._main_tb.addAction("Save ASS", self._save_ass)
 
-        # Undo / redo actions (enabled state mirrors the store's UndoStack).
-        # Shortcut keys are not bound to the QAction here — global QShortcut
-        # objects below own the key bindings to avoid Qt's "ambiguous shortcut
-        # overload" warning. The shortcut text is shown in the tooltip only.
+        # Undo / Redo
+        self._undo_btn = theme.IconButton(
+            theme.Icons.undo(),
+            tooltip=f"Undo ({shortcuts.UNDO.toString()})",
+            icon_only=True,
+        )
+        self._undo_btn.clicked.connect(self._edit.undo)
+        self._undo_btn.setEnabled(False)
+        self._redo_btn = theme.IconButton(
+            theme.Icons.redo(),
+            tooltip=f"Redo ({shortcuts.REDO.toString()})",
+            icon_only=True,
+        )
+        self._redo_btn.clicked.connect(self._edit.redo)
+        self._redo_btn.setEnabled(False)
+        self._store.undo_stack.can_undo_changed.connect(self._undo_btn.setEnabled)
+        self._store.undo_stack.can_redo_changed.connect(self._redo_btn.setEnabled)
+        # Unsaved-dot wiring — UndoStack has no dirty_changed signal, so mark
+        # dirty on every label mutation and clear it explicitly in _save_ass.
+        self._store.labels_mutated.connect(
+            lambda _ids: self._save_btn.set_unsaved(True)
+        )
+        self._main_tb.addWidget(self._undo_btn)
+        self._main_tb.addWidget(self._redo_btn)
+
         self._main_tb.addSeparator()
-        undo_action = QAction("Undo", self)
-        undo_action.setToolTip("Undo (" + shortcuts.UNDO.toString() + ")")
-        undo_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowBack))
-        undo_action.setEnabled(False)
-        undo_action.triggered.connect(self._edit.undo)
 
-        redo_action = QAction("Redo", self)
-        redo_action.setToolTip("Redo (" + shortcuts.REDO.toString() + ")")
-        redo_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowForward))
-        redo_action.setEnabled(False)
-        redo_action.triggered.connect(self._edit.redo)
+        # Group navigation
+        prev_group_btn = theme.IconButton(
+            theme.Icons.prev_group(),
+            tooltip=f"Previous group ({shortcuts.PREV_GROUP.toString()})",
+            icon_only=True,
+        )
+        prev_group_btn.clicked.connect(lambda: self._goto_group(self._group_index - 1))
+        next_group_btn = theme.IconButton(
+            theme.Icons.next_group(),
+            tooltip=f"Next group ({shortcuts.NEXT_GROUP.toString()})",
+            icon_only=True,
+        )
+        next_group_btn.clicked.connect(lambda: self._goto_group(self._group_index + 1))
+        self._main_tb.addWidget(prev_group_btn)
+        self._main_tb.addWidget(next_group_btn)
 
-        self._undo_action = undo_action
-        self._redo_action = redo_action
-        self._main_tb.addAction(undo_action)
-        self._main_tb.addAction(redo_action)
-
-        self._store.undo_stack.can_undo_changed.connect(undo_action.setEnabled)
-        self._store.undo_stack.can_redo_changed.connect(redo_action.setEnabled)
-
-        # mpv rendering controls
         self._main_tb.addSeparator()
-        self._main_tb.addWidget(QLabel("  HW Decode: "))
-        self._hwdec_combo = QComboBox()
-        self._hwdec_combo.setToolTip("Hardware decoding mode for mpv playback")
-        for label, value in [
-            ("Auto (safe)", "auto-safe"),
-            ("Auto (copy-back)", "auto-copy"),
-            ("Software", "no"),
-            ("VAAPI", "vaapi"),
-            ("VAAPI (copy)", "vaapi-copy"),
-            ("NVDEC", "nvdec"),
-            ("NVDEC (copy)", "nvdec-copy"),
-        ]:
-            self._hwdec_combo.addItem(label, value)
-        saved_hwdec = _init_settings.value("mpv/hwdec", "auto-safe")
-        idx = self._hwdec_combo.findData(saved_hwdec)
-        if idx >= 0:
-            self._hwdec_combo.setCurrentIndex(idx)
-        self._hwdec_combo.currentIndexChanged.connect(self._on_hwdec_changed)
-        self._main_tb.addWidget(self._hwdec_combo)
 
-        self._hq_checkbox = QCheckBox("High Quality")
-        self._hq_checkbox.setToolTip("Enable spline36 scaling, debanding, and other quality options")
-        self._hq_checkbox.setChecked(self._app_settings.perf.mpv_quality == "high")
-        self._hq_checkbox.toggled.connect(self._on_hq_toggled)
-        self._main_tb.addWidget(self._hq_checkbox)
+        # View toggles
+        self._gallery_btn = theme.IconButton(
+            theme.Icons.gallery_toggle(),
+            tooltip=f"Toggle gallery ({shortcuts.TOGGLE_GALLERY.toString()})",
+            icon_only=True,
+        )
+        self._gallery_btn.setCheckable(True)
+        self._gallery_btn.setChecked(self._app_settings.display.gallery_visible)
+        self._gallery_btn.toggled.connect(self._on_gallery_toggled)
+        self._main_tb.addWidget(self._gallery_btn)
 
-        self._main_tb.hide()
+        self._sidebar_btn = theme.IconButton(
+            theme.Icons.sidebar_toggle(),
+            tooltip="Toggle file sidebar",
+            icon_only=True,
+        )
+        self._sidebar_btn.setCheckable(True)
+        self._sidebar_btn.setChecked(self._app_settings.display.sidebar_visible)
+        self._sidebar_btn.toggled.connect(self._on_sidebar_toggled)
+        self._main_tb.addWidget(self._sidebar_btn)
+
+        # Stretch
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._main_tb.addWidget(spacer)
+
+        # Settings cog
+        self._settings_btn = theme.IconButton(
+            theme.Icons.settings(), tooltip="Preferences", icon_only=True,
+        )
+        self._settings_btn.clicked.connect(self._show_settings_dialog)
+        self._main_tb.addWidget(self._settings_btn)
+
+        self._main_tb.hide()  # shown when editor page is active (existing behavior)
 
         # Shortcuts — frame stepping (arrow keys)
         QShortcut(shortcuts.NEXT_FRAME, self, self._on_step_forward)
@@ -720,6 +766,7 @@ class MainWindow(QMainWindow):
         QShortcut(shortcuts.REDO, self, activated=self._edit.redo)
         QShortcut(shortcuts.REDO_ALT_Y, self, activated=self._edit.redo)
         QShortcut(shortcuts.REDO_ALT_SHIFT_Z, self, activated=self._edit.redo)
+        QShortcut(shortcuts.TOGGLE_GALLERY, self, lambda: self._gallery_btn.toggle())
 
         # ── Connect signals ──
 
@@ -1216,6 +1263,9 @@ class MainWindow(QMainWindow):
         self._mpv_widget.reload_subtitles()
         self._repopulate_cache()
         _status_msg(self, f"Saved: {path}")
+        # Clear the unsaved-dot on the primary Save button (Task 12)
+        if hasattr(self, "_save_btn"):
+            self._save_btn.set_unsaved(False)
 
     def _repopulate_cache(self) -> None:
         """Rebuild the preload cache entry from current live state."""
@@ -2045,7 +2095,12 @@ class MainWindow(QMainWindow):
     # ── mpv rendering settings ──
 
     def _on_hwdec_changed(self, index: int) -> None:
-        value = self._hwdec_combo.currentData()
+        # Legacy slot — the combobox no longer exists. Kept as a no-op stub so
+        # any remaining internal callers don't crash during the transition.
+        pass
+
+    def _on_hwdec_changed_by_value(self, value: str) -> None:
+        """Apply hwdec change from the settings dialog (replaces combobox-driven path)."""
         self._mpv_widget.set_hwdec(value)
         self._settings.setValue("mpv/hwdec", value)
 
@@ -2060,6 +2115,10 @@ class MainWindow(QMainWindow):
             log.exception("Failed to persist mpv_quality setting")
 
     def _on_show_gallery_toggled(self, checked: bool) -> None:
+        """Legacy slot — delegates to the new _on_gallery_toggled."""
+        self._on_gallery_toggled(checked)
+
+    def _on_gallery_toggled(self, visible: bool) -> None:
         """Toggle the gallery panel's visibility and persist the choice.
 
         When the gallery becomes visible its own ``showEvent`` triggers a
@@ -2067,12 +2126,35 @@ class MainWindow(QMainWindow):
         When hidden, ``_start_thumbnail_loading``/``_refresh_single_thumbnail``
         no-op so no ffmpeg/CPU work is spent rendering invisible thumbs.
         """
-        self._gallery.setVisible(checked)
-        self._app_settings.perf.gallery_enabled = checked
-        try:
-            save_perf_settings(self._app_settings.perf)
-        except Exception:
-            log.exception("Failed to persist gallery_enabled setting")
+        self._gallery.setVisible(visible)
+        self._app_settings.display.gallery_visible = visible
+        from sub_label_pos.services.app_settings import save_display
+        save_display(self._app_settings.display)
+        if hasattr(self, "_gallery_btn") and self._gallery_btn.isChecked() != visible:
+            self._gallery_btn.blockSignals(True)
+            self._gallery_btn.setChecked(visible)
+            self._gallery_btn.blockSignals(False)
+
+    def _on_sidebar_toggled(self, visible: bool) -> None:
+        """Toggle the file sidebar dock visibility and persist the choice."""
+        self._files_dock.setVisible(visible)
+        self._app_settings.display.sidebar_visible = visible
+        from sub_label_pos.services.app_settings import save_display
+        save_display(self._app_settings.display)
+
+    def _show_settings_dialog(self) -> None:
+        """Open the Settings dialog. Applies changes on OK."""
+        dialog = SettingsDialog(self._app_settings, parent=self)
+        saved_hwdec = self._init_settings.value("mpv/hwdec", "auto-safe")
+        dialog.set_initial_hwdec(saved_hwdec)
+        dialog.hardware_redetect_requested.connect(self._on_redetect_hardware)
+        if dialog.exec():
+            new_hwdec = dialog.selected_hwdec()
+            self._init_settings.setValue("mpv/hwdec", new_hwdec)
+            self._on_hwdec_changed_by_value(new_hwdec)
+            self._on_hq_toggled(self._app_settings.perf.mpv_quality == "high")
+            self._on_gallery_toggled(self._app_settings.display.gallery_visible)
+            self._on_sidebar_toggled(self._app_settings.display.sidebar_visible)
 
     # ── Cleanup ──
 
