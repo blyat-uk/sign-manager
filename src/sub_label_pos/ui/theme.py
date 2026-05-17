@@ -76,7 +76,7 @@ class Icons:
 
     @classmethod
     def save(cls, color: str | None = None) -> QIcon:
-        return cls._i("ph.bold.floppy-disk", color)
+        return cls._i("ph.floppy-disk-bold", color)
 
     @classmethod
     def undo(cls, color: str | None = None) -> QIcon:
@@ -118,7 +118,7 @@ class Icons:
     # Formatting
     @classmethod
     def bold(cls, color: str | None = None) -> QIcon:
-        return cls._i("ph.bold.text-b", color)
+        return cls._i("ph.text-bolder", color)
 
     @classmethod
     def italic(cls, color: str | None = None) -> QIcon:
@@ -156,7 +156,7 @@ class Icons:
 
     @classmethod
     def sidebar_toggle(cls, color: str | None = None) -> QIcon:
-        return cls._i("ph.sidebar", color)
+        return cls._i("ph.list", color)
 
     @classmethod
     def settings(cls, color: str | None = None) -> QIcon:
@@ -169,11 +169,11 @@ class Icons:
     # Playback
     @classmethod
     def play(cls, color: str | None = None) -> QIcon:
-        return cls._i("ph.fill.play", color)
+        return cls._i("ph.play-fill", color)
 
     @classmethod
     def pause(cls, color: str | None = None) -> QIcon:
-        return cls._i("ph.fill.pause", color)
+        return cls._i("ph.pause-fill", color)
 
     @classmethod
     def step_back(cls, color: str | None = None) -> QIcon:
@@ -214,7 +214,7 @@ class Icons:
 
     @classmethod
     def folder_dashed(cls, color: str | None = None) -> QIcon:
-        return cls._i("ph.folder-dashed", color)
+        return cls._i("ph.folder-minus", color)
 
     @classmethod
     def upload(cls, color: str | None = None) -> QIcon:
@@ -222,24 +222,24 @@ class Icons:
 
     @classmethod
     def file_video(cls, color: str | None = None) -> QIcon:
-        return cls._i("ph.file-video", color)
+        return cls._i("ph.film-strip", color)
 
     @classmethod
     def magnet(cls, color: str | None = None) -> QIcon:
-        return cls._i("ph.fill.magnet", color)
+        return cls._i("ph.magnet-fill", color)
 
     @classmethod
     def modified_dot(cls, color: str | None = None) -> QIcon:
-        return cls._i("ph.fill.circle", color)
+        return cls._i("ph.circle-fill", color)
 
     @classmethod
     def group_stack(cls, color: str | None = None) -> QIcon:
-        return cls._i("ph.fill.stack", color)
+        return cls._i("ph.stack-fill", color)
 
     @classmethod
     def zoom_in(cls, color: str | None = None) -> QIcon:
-        return cls._i("ph.fill.magnifying-glass-plus", color)
+        return cls._i("ph.magnifying-glass-plus-fill", color)
 
     @classmethod
     def app_logo(cls, color: str | None = None) -> QIcon:
-        return cls._i("ph.bold.text-aa", color)
+        return cls._i("ph.text-aa-bold", color)
