@@ -324,122 +324,187 @@ class WelcomeWidget(QWidget):
     open_video_clicked = pyqtSignal()
     open_folder_clicked = pyqtSignal()
     recent_directory_clicked = pyqtSignal(str)
+    clear_all_clicked = pyqtSignal()
 
     def __init__(self) -> None:
         super().__init__()
-        self.setStyleSheet("background: #1e1e1e;")
+        from sub_label_pos.ui import theme
 
-        layout = QVBoxLayout(self)
-        layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.setStyleSheet(f"background: {theme.Tokens.bg_base};")
 
-        layout.addStretch(1)
+        outer = QVBoxLayout(self)
+        outer.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        outer.setContentsMargins(40, 48, 40, 36)
+        outer.setSpacing(theme.Tokens.sp_5)
 
-        title = QLabel("Sub Label Pos")
-        title.setStyleSheet("font-size: 28px; color: #ccc; font-weight: bold; background: transparent;")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
+        # --- Hero ---
+        hero = QWidget()
+        hero.setStyleSheet("background: transparent;")
+        hero_layout = QVBoxLayout(hero)
+        hero_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hero_layout.setSpacing(6)
 
-        subtitle = QLabel("ASS Subtitle Label Editor")
-        subtitle.setStyleSheet("font-size: 14px; color: #888; background: transparent;")
+        title_row = QWidget()
+        title_row.setStyleSheet("background: transparent;")
+        title_row_layout = QHBoxLayout(title_row)
+        title_row_layout.setSpacing(12)
+        title_row_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_icon = QLabel()
+        title_icon.setStyleSheet("background: transparent;")
+        title_icon.setPixmap(
+            theme.Icons.app_logo(color=theme.Tokens.accent).pixmap(QSize(28, 28))
+        )
+        title_text = QLabel("Sub Label Pos")
+        title_text.setStyleSheet(
+            f"color: {theme.Tokens.text_emphasis}; font-size: {theme.Tokens.text_hero}px; "
+            f"font-weight: 700; letter-spacing: -0.3px; background: transparent;"
+        )
+        title_row_layout.addWidget(title_icon)
+        title_row_layout.addWidget(title_text)
+        hero_layout.addWidget(title_row)
+
+        subtitle = QLabel("Visually position labels in .ass subtitle files — drag, snap, save.")
+        subtitle.setStyleSheet(
+            f"color: {theme.Tokens.text_muted}; font-size: 13px; background: transparent;"
+        )
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(subtitle)
+        hero_layout.addWidget(subtitle)
+        outer.addWidget(hero)
 
-        layout.addSpacing(24)
+        # --- Recent panel ---
+        panel = QWidget()
+        panel.setFixedWidth(540)
+        panel.setStyleSheet("background: transparent;")
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(8)
 
-        header = QLabel("Recent Directories")
-        header.setStyleSheet("font-size: 13px; color: #aaa; background: transparent;")
-        header.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        header.setFixedWidth(500)
-        layout.addWidget(header, alignment=Qt.AlignmentFlag.AlignHCenter)
-        layout.addSpacing(4)
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(4, 0, 4, 0)
+        eyebrow = QLabel("RECENT FOLDERS")
+        eyebrow.setStyleSheet(
+            f"color: {theme.Tokens.text_muted}; font-size: 10.5px; "
+            f"text-transform: uppercase; letter-spacing: 0.6px; "
+            f"font-weight: 700; background: transparent;"
+        )
+        clear_btn = QLabel("✕ Clear all")
+        clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        clear_btn.setStyleSheet(
+            f"color: {theme.Tokens.border_strong}; font-size: 11px; background: transparent;"
+        )
+        clear_btn.mousePressEvent = lambda _e: self._on_clear_all_clicked()
+        header_row.addWidget(eyebrow)
+        header_row.addStretch()
+        header_row.addWidget(clear_btn)
+        panel_layout.addLayout(header_row)
 
         self._list = QListWidget()
-        self._list.setFixedSize(500, 350)
-        self._list.setStyleSheet("""
-            QListWidget {
-                background: #252525;
-                border: 1px solid #555;
-                border-radius: 4px;
+        self._list.setStyleSheet(f"""
+            QListWidget {{
+                background: {theme.Tokens.bg_surface};
+                border: 1px solid {theme.Tokens.border};
+                border-radius: 7px;
                 outline: none;
-            }
-            QListWidget::item {
-                padding: 8px 10px;
-                border-bottom: 1px solid #333;
-            }
-            QListWidget::item:selected {
-                background: #4a9eff;
-            }
-            QListWidget::item:hover:!selected {
-                background: #333;
-            }
+            }}
+            QListWidget::item {{
+                border-bottom: 1px solid #232629;
+            }}
+            QListWidget::item:last-child {{ border-bottom: none; }}
+            QListWidget::item:selected {{
+                background: {theme.Tokens.accent_deep};
+            }}
+            QListWidget::item:hover:!selected {{
+                background: {theme.Tokens.bg_raised};
+            }}
         """)
         self._list.itemDoubleClicked.connect(self._on_item_activated)
+        self._list.itemActivated.connect(self._on_item_activated)
         self._list.installEventFilter(self)
-        layout.addWidget(self._list, alignment=Qt.AlignmentFlag.AlignHCenter)
+        panel_layout.addWidget(self._list)
 
-        self._empty_label = QLabel("No recent directories")
-        self._empty_label.setStyleSheet("font-size: 12px; color: #666; background: transparent;")
+        self._empty_label = QLabel("\U0001f4c1 No recent folders yet — open a video or folder below to get started.")
+        self._empty_label.setStyleSheet(
+            f"color: {theme.Tokens.border_strong}; font-size: 12px; padding: 30px 20px; "
+            f"background: {theme.Tokens.bg_surface}; border: 1px solid {theme.Tokens.border}; "
+            f"border-radius: 7px;"
+        )
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty_label.setFixedWidth(500)
         self._empty_label.hide()
-        layout.addWidget(self._empty_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        panel_layout.addWidget(self._empty_label)
 
-        layout.addSpacing(16)
+        outer.addWidget(panel, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(12)
-        btn_style = """
-            QPushButton {
-                background: #3a3a3a;
-                color: #ccc;
-                border: 1px solid #555;
-                border-radius: 4px;
-                padding: 8px 24px;
-                font-size: 13px;
-            }
-            QPushButton:hover { background: #505050; }
-            QPushButton:pressed { background: #606060; }
-        """
-        btn_video = QPushButton("Open Video")
-        btn_video.setStyleSheet(btn_style)
+        # --- Action buttons ---
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(10)
+        actions_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        btn_video = theme.IconButton(
+            theme.Icons.file_video(), "Open video",
+            tooltip="Open a video file (.mkv, .mp4, .avi, .webm)",
+        )
+        btn_video.setFixedHeight(38)
+        btn_video.setStyleSheet(
+            btn_video.styleSheet()
+            + f" QPushButton {{ background: {theme.Tokens.bg_raised}; "
+              f"border: 1px solid {theme.Tokens.border}; padding: 0 22px; }}"
+        )
         btn_video.clicked.connect(self.open_video_clicked)
-        btn_row.addWidget(btn_video)
 
-        btn_folder = QPushButton("Open Folder")
-        btn_folder.setStyleSheet(btn_style)
+        btn_folder = theme.IconButton(
+            theme.Icons.open_folder(), "Open folder",
+            tooltip="Open a folder of videos (folder mode)",
+        )
+        btn_folder.setFixedHeight(38)
+        btn_folder.setStyleSheet(btn_video.styleSheet())
         btn_folder.clicked.connect(self.open_folder_clicked)
-        btn_row.addWidget(btn_folder)
 
-        layout.addLayout(btn_row)
-        layout.addStretch(1)
+        actions_row.addWidget(btn_video)
+        actions_row.addWidget(btn_folder)
+        outer.addLayout(actions_row)
 
-        self._dirs: list[str] = []
+        # --- Drop hint ---
+        drop_hint = QLabel("↓ or drag a video onto the window")
+        drop_hint.setStyleSheet(
+            f"color: {theme.Tokens.border_strong}; font-size: 11px; background: transparent;"
+        )
+        drop_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        outer.addWidget(drop_hint)
 
-    def set_recent_dirs(self, dirs: list[str]) -> None:
-        self._dirs = dirs
+        self._dirs: list[dict] = []
+
+    def set_recent_dirs(self, dirs: list) -> None:
+        """Accepts list[str] (legacy) or list[dict]. Migrates internally."""
+        from sub_label_pos.ui import theme
+        from sub_label_pos.ui.recent_dirs import migrate
+        from datetime import datetime
+
+        self._dirs = migrate(dirs)
         self._list.clear()
-        if not dirs:
+        if not self._dirs:
             self._list.hide()
             self._empty_label.show()
             return
         self._list.show()
         self._empty_label.hide()
-        for d in dirs:
-            p = Path(d)
+
+        for entry in self._dirs:
+            p = Path(entry["path"])
+            last_opened = None
+            if entry.get("last_opened"):
+                try:
+                    last_opened = datetime.fromisoformat(entry["last_opened"])
+                except ValueError:
+                    last_opened = None
+            widget = theme.RecentItemWidget(
+                name=p.name,
+                path=str(p),
+                file_count=entry.get("file_count"),
+                last_opened=last_opened,
+            )
             item = QListWidgetItem()
-            widget = QWidget()
-            widget.setStyleSheet("background: transparent;")
-            vbox = QVBoxLayout(widget)
-            vbox.setContentsMargins(0, 0, 0, 0)
-            vbox.setSpacing(2)
-            name_label = QLabel(p.name)
-            name_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #ccc; background: transparent;")
-            path_label = QLabel(str(p))
-            path_label.setStyleSheet("font-size: 11px; color: #888; background: transparent;")
-            vbox.addWidget(name_label)
-            vbox.addWidget(path_label)
-            item.setSizeHint(QSize(480, 44))
-            item.setData(Qt.ItemDataRole.UserRole, d)
+            item.setSizeHint(QSize(520, 56))
+            item.setData(Qt.ItemDataRole.UserRole, entry["path"])
             self._list.addItem(item)
             self._list.setItemWidget(item, widget)
 
@@ -447,6 +512,12 @@ class WelcomeWidget(QWidget):
         path = item.data(Qt.ItemDataRole.UserRole)
         if path:
             self.recent_directory_clicked.emit(path)
+
+    def _on_clear_all_clicked(self) -> None:
+        if QMessageBox.question(
+            self, "Clear recent folders", "Remove all recent folders?"
+        ) == QMessageBox.StandardButton.Yes:
+            self.clear_all_clicked.emit()
 
     def eventFilter(self, obj, event):
         if obj is self._list and event.type() == event.Type.KeyPress:
@@ -875,6 +946,7 @@ class MainWindow(QMainWindow):
         self._welcome.open_video_clicked.connect(self._open_video)
         self._welcome.open_folder_clicked.connect(self._open_folder)
         self._welcome.recent_directory_clicked.connect(self._open_recent_directory)
+        self._welcome.clear_all_clicked.connect(self._on_clear_all_recent)
 
         # Settings & recent directories
         self._settings = QSettings("SubLabelPos", "SubLabelPos")
@@ -910,30 +982,45 @@ class MainWindow(QMainWindow):
         self._main_tb.show()
 
     def _load_recent_dirs(self) -> None:
-        dirs = self._settings.value("recent_dirs", type=list) or []
-        dirs = [d for d in dirs if Path(d).is_dir()]
-        self._welcome.set_recent_dirs(dirs)
+        from sub_label_pos.ui.recent_dirs import migrate
+        raw = self._settings.value("recent_dirs", type=list) or []
+        items = migrate(raw)
+        # Drop entries pointing at folders that no longer exist
+        items = [e for e in items if Path(e["path"]).is_dir()]
+        self._welcome.set_recent_dirs(items)
 
     def _add_recent_dir(self, directory: str) -> None:
-        dirs = self._settings.value("recent_dirs", type=list) or []
-        if directory in dirs:
-            dirs.remove(directory)
-        dirs.insert(0, directory)
-        dirs = dirs[:self._MAX_RECENT]
-        self._settings.setValue("recent_dirs", dirs)
-        self._welcome.set_recent_dirs(dirs)
+        from sub_label_pos.ui.recent_dirs import migrate, touch
+        raw = self._settings.value("recent_dirs", type=list) or []
+        items = migrate(raw)
+        # Best-effort file count for the welcome card stats
+        try:
+            file_count = sum(
+                1 for p in Path(directory).iterdir()
+                if p.is_file() and p.suffix.lower() in {".mkv", ".mp4", ".avi", ".webm"}
+            )
+        except OSError:
+            file_count = None
+        items = touch(items, directory, file_count=file_count, max_items=self._MAX_RECENT)
+        self._settings.setValue("recent_dirs", items)
+        self._welcome.set_recent_dirs(items)
 
     def _open_recent_directory(self, folder: str) -> None:
+        from sub_label_pos.ui.recent_dirs import migrate
         if not Path(folder).is_dir():
-            dirs = self._settings.value("recent_dirs", type=list) or []
-            if folder in dirs:
-                dirs.remove(folder)
-                self._settings.setValue("recent_dirs", dirs)
-                self._welcome.set_recent_dirs(dirs)
+            raw = self._settings.value("recent_dirs", type=list) or []
+            items = migrate(raw)
+            items = [e for e in items if e["path"] != folder]
+            self._settings.setValue("recent_dirs", items)
+            self._welcome.set_recent_dirs(items)
             QMessageBox.warning(self, "Not Found", f"Directory no longer exists:\n{folder}")
             return
         self._switch_to_editor()
         self._open_folder_path(folder)
+
+    def _on_clear_all_recent(self) -> None:
+        self._settings.setValue("recent_dirs", [])
+        self._welcome.set_recent_dirs([])
 
     # ── File loading ──
 
