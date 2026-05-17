@@ -559,15 +559,20 @@ class GalleryPanel(QWidget):
     # --- Signal handlers ------------------------------------------------
 
     def _on_file_loaded(self, _path) -> None:
-        """Clear pending workers and per-file cache. ``groups_changed`` will
-        immediately follow (DerivedGroupModel also subscribes to file_loaded)
-        and trigger the actual rebuild.
+        """Clear per-file UI state. ``groups_changed`` fires synchronously
+        from inside this same ``file_loaded`` emission (DerivedGroupModel is
+        connected first), so the actual rebuild + worker spawn happens in
+        ``_on_groups_changed``.
+
+        IMPORTANT: do NOT call ``_cancel_loading`` here. DerivedGroupModel is
+        connected to ``file_loaded`` before us, so by the time we run, a new
+        worker has already been spawned by the groups_changed cascade.
+        Cancelling it here breaks first-load thumbnails. Worker cancellation
+        for the prior file happens at the start of ``_on_groups_changed``.
 
         Note: ``_path`` here is the store's source_path (the .ass file). The
         video path is set separately via :meth:`attach_video`.
         """
-        self._cancel_loading()
-        self._cancel_single_refresh()
         self._selected_index = -1
         # Clear preloaded thumbnail cache from the previous file.
         self._preloaded_thumbnails.clear()
