@@ -161,3 +161,18 @@ def test_snap_label_set_target(qapp):
     label.set_target("Title")
     assert label.isVisible()
     assert "Title" in label.text()
+
+
+def test_recent_item_widget_constructs(qapp):
+    from datetime import datetime, timedelta, timezone
+    w = theme.RecentItemWidget(
+        "anime-project", "/home/u/Videos/anime",
+        file_count=12,
+        last_opened=datetime.now(timezone.utc) - timedelta(hours=2),
+    )
+    assert w.sizeHint().width() > 0
+
+
+def test_recent_item_widget_omits_stats_when_none(qapp):
+    w = theme.RecentItemWidget("project", "/path", file_count=None, last_opened=None)
+    assert w.sizeHint().width() > 0

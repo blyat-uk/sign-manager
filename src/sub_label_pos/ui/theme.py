@@ -784,3 +784,69 @@ class SnapLabel(QLabel):
         self.setText(f"aligned to {target_name}")
         self.adjustSize()
         self.show()
+
+
+class RecentItemWidget(QWidget):
+    """Welcome-screen recent-folder row: [icon] name + path  ·  files · time."""
+
+    def __init__(
+        self,
+        name: str,
+        path: str,
+        *,
+        file_count: int | None = None,
+        last_opened: datetime | None = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(14, 11, 14, 11)
+        outer.setSpacing(12)
+
+        # Icon tile
+        icon_label = QLabel()
+        icon_label.setFixedSize(32, 32)
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_label.setPixmap(Icons.folder(color=Tokens.accent).pixmap(QSize(18, 18)))
+        icon_label.setStyleSheet(
+            f"background: {Tokens.bg_raised}; border-radius: {Tokens.r_md}px;"
+        )
+
+        # Meta column
+        meta = QVBoxLayout()
+        meta.setContentsMargins(0, 0, 0, 0)
+        meta.setSpacing(1)
+        name_label = QLabel(name)
+        name_label.setStyleSheet(
+            f"color: {Tokens.text_emphasis}; font-size: 13px; font-weight: 600; "
+            f"background: transparent;"
+        )
+        path_label = QLabel(path)
+        path_label.setStyleSheet(
+            f"color: {Tokens.text_muted}; font-size: 10.5px; "
+            f"font-family: ui-monospace, Menlo, Consolas, monospace; background: transparent;"
+        )
+        meta.addWidget(name_label)
+        meta.addWidget(path_label)
+
+        # Stats column
+        stats = QHBoxLayout()
+        stats.setSpacing(12)
+        if file_count is not None:
+            files_label = QLabel(f"📁 {file_count}")
+            files_label.setStyleSheet(
+                f"color: {Tokens.text_muted}; font-size: 10.5px; "
+                f"background: transparent; font-variant-numeric: tabular-nums;"
+            )
+            stats.addWidget(files_label)
+        if last_opened is not None:
+            time_label = QLabel(f"🕐 {format_relative_time(last_opened)}")
+            time_label.setStyleSheet(
+                f"color: {Tokens.text_muted}; font-size: 10.5px; "
+                f"background: transparent;"
+            )
+            stats.addWidget(time_label)
+
+        outer.addWidget(icon_label)
+        outer.addLayout(meta, 1)
+        outer.addLayout(stats)
