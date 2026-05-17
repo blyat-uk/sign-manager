@@ -79,3 +79,39 @@ def test_settings_dialog_constructs(qapp):
     assert d.windowTitle() == "Preferences"
     d.set_initial_hwdec("vaapi")
     assert d.selected_hwdec() == "vaapi"
+
+
+def test_display_settings_labels_sidebar_default_visible():
+    s = DisplaySettings()
+    assert s.labels_sidebar_visible is True
+
+
+def test_display_settings_labels_sidebar_roundtrip(tmp_path: Path):
+    p = tmp_path / "settings.json"
+    s = AppSettings(display=DisplaySettings(
+        gallery_visible=True, sidebar_visible=True, labels_sidebar_visible=False,
+    ))
+    save(s, p)
+    s2 = load(p)
+    assert s2.display.labels_sidebar_visible is False
+
+
+def test_legacy_settings_file_without_labels_sidebar_key_defaults_to_visible(tmp_path: Path):
+    """Files written before this change lack 'labels_sidebar_visible' — default True."""
+    import json
+    p = tmp_path / "settings.json"
+    legacy = {
+        "version": 1,
+        "hardware_tier": "medium",
+        "detected_ram_gb": 16.0,
+        "detected_cpu_cores": 8,
+        "perf": {
+            "thumb_max_dim": 720, "thumb_jpeg_quality": 6, "frame_cache_size": 32,
+            "preload_workers": 2, "frame_queue_workers": 2, "mpv_quality": "high",
+            "gallery_enabled": True, "preload_ring": 2,
+        },
+        "display": {"gallery_visible": True, "sidebar_visible": True},
+    }
+    p.write_text(json.dumps(legacy))
+    loaded = load(p)
+    assert loaded.display.labels_sidebar_visible is True

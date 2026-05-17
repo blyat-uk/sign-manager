@@ -37,6 +37,7 @@ class DisplaySettings:
     """User-toggleable visibility of UI surfaces."""
     gallery_visible: bool = True
     sidebar_visible: bool = True
+    labels_sidebar_visible: bool = True
 
 
 @dataclass
