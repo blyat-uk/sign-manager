@@ -66,6 +66,7 @@ from sub_label_pos.ui.gallery_widget import GalleryPanel, LabelGroup, compute_la
 from sub_label_pos.ui.label_toolbar import LabelToolbar
 from sub_label_pos.ui.timeline_widget import TimelineWidget
 from sub_label_pos.ui import theme
+from sub_label_pos.ui.labels_sidebar import LabelsSidebar
 from sub_label_pos.ui.settings_dialog import SettingsDialog
 
 _VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".webm"}
@@ -651,6 +652,10 @@ class MainWindow(QMainWindow):
         self._ass_path: str | None = None
         self._style_clipboard: dict | None = None
         self.__dirty: bool = False
+        # Per-label dirty tracker. Accumulates on every labels_mutated;
+        # cleared on file_loaded and on successful _save_ass. Shared with
+        # the labels sidebar (and, opportunistically, the gallery thumbs).
+        self._dirty_label_ids: set = set()
         self._folder_files: list[str] = []
         self._folder_index: int = -1
         self._suppress_resize: bool = False
@@ -732,6 +737,23 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._files_dock)
         self._files_dock.hide()
         self._file_list.currentRowChanged.connect(self._on_file_list_clicked)
+
+        # ── Labels sidebar (right) ──
+        self._labels_sidebar = LabelsSidebar(self._store, parent=self)
+        self._labels_dock = QDockWidget("Labels", self)
+        self._labels_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
+        self._labels_dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
+        self._labels_dock.setTitleBarWidget(QWidget())  # hide native title bar
+        self._labels_dock.setWidget(self._labels_sidebar)
+        self._labels_dock.setMinimumWidth(240)
+        self._labels_dock.setMaximumWidth(400)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._labels_dock)
+        self._labels_dock.setVisible(self._app_settings.display.labels_sidebar_visible)
+
+        self._labels_sidebar.row_clicked.connect(self._on_labels_row_clicked)
+        self._labels_sidebar.row_jump_requested.connect(self._on_labels_row_jump)
+        self._labels_sidebar.row_edit_requested.connect(self._on_edit_requested)
+        self._labels_sidebar.row_delete_requested.connect(self._delete_labels)
 
         # Layout: splitter with video stack + timeline on top, gallery on bottom
         self._mpv_widget = MpvPreviewWidget()
@@ -869,6 +891,8 @@ class MainWindow(QMainWindow):
         self._store.labels_mutated.connect(
             lambda _ids: self._save_btn.set_unsaved(True)
         )
+        self._store.labels_mutated.connect(self._on_labels_mutated_dirty)
+        self._store.file_loaded.connect(self._on_file_loaded_dirty)
         self._main_tb.addWidget(self._undo_btn)
         self._main_tb.addWidget(self._redo_btn)
 
@@ -912,6 +936,16 @@ class MainWindow(QMainWindow):
         self._sidebar_btn.setChecked(self._app_settings.display.sidebar_visible)
         self._sidebar_btn.toggled.connect(self._on_sidebar_toggled)
         self._main_tb.addWidget(self._sidebar_btn)
+
+        self._labels_sidebar_btn = theme.IconButton(
+            theme.Icons.labels_sidebar_toggle(),
+            tooltip=f"Toggle labels list ({shortcuts.TOGGLE_LABELS_SIDEBAR.toString()})",
+            icon_only=True,
+        )
+        self._labels_sidebar_btn.setCheckable(True)
+        self._labels_sidebar_btn.setChecked(self._app_settings.display.labels_sidebar_visible)
+        self._labels_sidebar_btn.toggled.connect(self._on_labels_sidebar_toggled)
+        self._main_tb.addWidget(self._labels_sidebar_btn)
 
         # Stretch
         spacer = QWidget()
@@ -987,6 +1021,8 @@ class MainWindow(QMainWindow):
         QShortcut(shortcuts.REDO_ALT_Y, self, activated=self._edit.redo)
         QShortcut(shortcuts.REDO_ALT_SHIFT_Z, self, activated=self._edit.redo)
         QShortcut(shortcuts.TOGGLE_GALLERY, self, lambda: self._gallery_btn.toggle())
+        QShortcut(shortcuts.TOGGLE_LABELS_SIDEBAR, self,
+                  lambda: self._labels_sidebar_btn.toggle())
         QShortcut(shortcuts.DUPLICATE, self, lambda: self._toolbar.duplicate_clicked.emit())
         QShortcut(shortcuts.PASTE_STYLE, self, lambda: self._toolbar.paste_style_clicked.emit())
 
@@ -1600,6 +1636,9 @@ class MainWindow(QMainWindow):
         # Clear the unsaved-dot on the primary Save button (Task 12)
         if hasattr(self, "_save_btn"):
             self._save_btn.set_unsaved(False)
+        self._dirty_label_ids.clear()
+        if hasattr(self, "_labels_sidebar"):
+            self._labels_sidebar.mark_clean()
         # Hide the unsaved chip in the status bar (Task 13)
         if hasattr(self, "_sb_modified"):
             self._sb_modified.hide()
@@ -2569,6 +2608,53 @@ class MainWindow(QMainWindow):
         from sub_label_pos.services.app_settings import save_display
         save_display(self._app_settings.display)
 
+    def _on_labels_sidebar_toggled(self, visible: bool) -> None:
+        """Toggle the labels-sidebar dock visibility and persist the choice."""
+        self._labels_dock.setVisible(visible)
+        self._app_settings.display.labels_sidebar_visible = visible
+        from sub_label_pos.services.app_settings import save_display
+        save_display(self._app_settings.display)
+        if self._labels_sidebar_btn.isChecked() != visible:
+            self._labels_sidebar_btn.blockSignals(True)
+            self._labels_sidebar_btn.setChecked(visible)
+            self._labels_sidebar_btn.blockSignals(False)
+
+    def _on_labels_mutated_dirty(self, ids: set) -> None:
+        self._dirty_label_ids |= set(ids)
+        if hasattr(self, "_labels_sidebar"):
+            self._labels_sidebar.set_dirty_ids(self._dirty_label_ids)
+
+    def _on_file_loaded_dirty(self, _path) -> None:
+        self._dirty_label_ids.clear()
+        if hasattr(self, "_labels_sidebar"):
+            self._labels_sidebar.set_dirty_ids(self._dirty_label_ids)
+
+    def _on_labels_row_clicked(self, row) -> None:
+        """Sidebar row left-clicked: seek to start AND select first label."""
+        self._on_labels_row_jump(row)
+        first_id = getattr(row.labels[0], "label_id", None)
+        if first_id is not None:
+            self._store.set_selected({first_id})
+
+    def _on_labels_row_jump(self, row) -> None:
+        """Sidebar row jump: seek to start, without changing selection."""
+        if hasattr(self._playback, "seek_to_time"):
+            self._playback.seek_to_time(row.start_time)
+        else:
+            # Fallback: drive the player widget directly (always present).
+            self._player.show_time(row.start_time)
+
+    def _delete_labels(self, labels) -> None:
+        """Delete the given iterable of LabelDialogue objects.
+
+        Factored from _on_delete (which still operates on canvas selection)
+        so the labels sidebar can delete a whole group at once.
+        """
+        ids = [lb.label_id for lb in labels if getattr(lb, "label_id", None) is not None]
+        if not ids:
+            return
+        self._edit.delete(ids)
+
     def _show_settings_dialog(self) -> None:
         """Open the Settings dialog. Applies changes on OK."""
         dialog = SettingsDialog(self._app_settings, parent=self)
@@ -2583,6 +2669,7 @@ class MainWindow(QMainWindow):
             self._on_hq_toggled(self._app_settings.perf.mpv_quality == "high")
             self._on_gallery_toggled(self._app_settings.display.gallery_visible)
             self._on_sidebar_toggled(self._app_settings.display.sidebar_visible)
+            self._on_labels_sidebar_toggled(self._app_settings.display.labels_sidebar_visible)
             self._update_status_hw()
 
     def _on_tier_overridden(self, new_tier: str) -> None:
