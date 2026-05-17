@@ -60,3 +60,18 @@ def test_format_relative_time():
 
 def test_format_relative_time_handles_none():
     assert theme.format_relative_time(None) == ""
+
+
+def test_icon_button_constructs(qapp):
+    btn = theme.IconButton(theme.Icons.save(), tooltip="Save (Ctrl+S)", icon_only=True)
+    assert btn.toolTip() == "Save (Ctrl+S)"
+    assert btn.size().width() == 30
+
+
+def test_primary_button_unsaved_dot(qapp):
+    btn = theme.PrimaryButton("Save", icon=theme.Icons.save())
+    assert btn._unsaved is False
+    btn.set_unsaved(True)
+    assert btn._unsaved is True
+    btn.set_unsaved(False)
+    assert btn._unsaved is False

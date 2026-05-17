@@ -12,7 +12,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QIcon, QColor, QPainter
+from PyQt6.QtWidgets import QPushButton
 import qtawesome as qta
 
 
@@ -278,3 +280,125 @@ def format_relative_time(then: datetime | None, *, now: datetime | None = None) 
         return f"{weeks} wk" if weeks == 1 else f"{weeks} wks"
     months = days // 30
     return f"{months} mo"
+
+
+_ICON_BUTTON_QSS = f"""
+QPushButton {{
+    background: transparent;
+    color: {Tokens.text_primary};
+    border: none;
+    border-radius: {Tokens.r_md - 1}px;
+    padding: 0 {Tokens.sp_2}px;
+    font-size: 12px;
+}}
+QPushButton:hover {{
+    background: {Tokens.bg_hover};
+    color: {Tokens.text_emphasis};
+}}
+QPushButton:pressed {{
+    background: {Tokens.border};
+}}
+QPushButton:disabled {{
+    color: {Tokens.text_muted};
+    opacity: 0.4;
+}}
+QPushButton:checked {{
+    background: {Tokens.accent_deep};
+    color: {Tokens.text_emphasis};
+}}
+"""
+
+
+class IconButton(QPushButton):
+    """Flat icon-or-icon+text button. Hover, pressed, disabled, checked states styled.
+
+    Pass tooltip with shortcut included: e.g. 'Save (Ctrl+S)'.
+    """
+
+    def __init__(
+        self,
+        icon: "QIcon | None" = None,
+        text: str = "",
+        *,
+        tooltip: str = "",
+        icon_only: bool = False,
+        parent=None,
+    ):
+        super().__init__(text if not icon_only else "", parent)
+        if icon is not None:
+            self.setIcon(icon)
+            from PyQt6.QtCore import QSize
+            self.setIconSize(QSize(18, 18))
+        if tooltip:
+            self.setToolTip(tooltip)
+        self.setFlat(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setStyleSheet(_ICON_BUTTON_QSS)
+        if icon_only:
+            self.setFixedSize(30, 30)
+        else:
+            self.setFixedHeight(30)
+
+
+_PRIMARY_BUTTON_QSS = f"""
+QPushButton {{
+    background: {Tokens.accent_deep};
+    color: {Tokens.text_emphasis};
+    border: 1px solid {Tokens.accent};
+    border-radius: {Tokens.r_md - 1}px;
+    padding: 0 {Tokens.sp_3}px;
+    font-size: 12px;
+    font-weight: 600;
+}}
+QPushButton:hover {{
+    background: #2a6fb8;
+}}
+QPushButton:pressed {{
+    background: {Tokens.accent_deep};
+}}
+QPushButton:disabled {{
+    background: {Tokens.bg_raised};
+    color: {Tokens.text_muted};
+    border-color: {Tokens.border};
+}}
+"""
+
+
+class PrimaryButton(QPushButton):
+    """Accent-blue Save-style button with optional unsaved-dot indicator."""
+
+    def __init__(self, text: str, icon=None, *, tooltip: str = "", parent=None):
+        super().__init__(text, parent)
+        if icon is not None:
+            self.setIcon(icon)
+            from PyQt6.QtCore import QSize
+            self.setIconSize(QSize(18, 18))
+        if tooltip:
+            self.setToolTip(tooltip)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setStyleSheet(_PRIMARY_BUTTON_QSS)
+        self.setFixedHeight(30)
+        self._unsaved = False
+
+    def set_unsaved(self, unsaved: bool) -> None:
+        """Toggle the unsaved-changes dot indicator (drawn in paintEvent)."""
+        if self._unsaved == unsaved:
+            return
+        self._unsaved = unsaved
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self._unsaved:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(Tokens.alert))
+        # 6px dot, 5px from top-right
+        x = self.width() - 11
+        y = 5
+        p.drawEllipse(x, y, 6, 6)
+        p.end()
