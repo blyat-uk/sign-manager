@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal, QObject, QThread
+from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal, QObject, QThread, QTimer
 from PyQt6.QtGui import (
     QPainter, QFont, QColor, QPen, QFontMetricsF, QCursor, QPixmap, QImage,
     QPainterPath,
@@ -34,6 +34,7 @@ from sub_label_pos.model.types import LabelId
 from sub_label_pos.services.exceptions import VideoServiceError
 from sub_label_pos.services.frame_request_queue import FrameRequestQueue
 from sub_label_pos.services.video_service import VideoService
+from sub_label_pos.ui import theme as _theme
 from sub_label_pos.ui.label_toolbar import ass_colour_to_qcolor
 
 log = logging.getLogger(__name__)
@@ -327,6 +328,14 @@ class VideoFrameWidget(QWidget):
         self._drag_layer_size: tuple[int, int] = (0, 0)
         self._drag_layer_dragged_ids: frozenset = frozenset()
 
+        # Loading pill: shown after a 250ms debounce when frames load slowly.
+        self._loading_pill = _theme.LoadingPill(text="Loading frame", parent=self)
+        self._loading_pending: bool = False
+        self._loading_debounce = QTimer(self)
+        self._loading_debounce.setSingleShot(True)
+        self._loading_debounce.setInterval(250)
+        self._loading_debounce.timeout.connect(self._show_loading_pill)
+
     def set_ass(self, ass: AssFile | None):
         self._ass = ass
         self._font_corrections.clear()
@@ -489,6 +498,8 @@ class VideoFrameWidget(QWidget):
                 Path(self._video_path), seconds,
                 max_dim=self._target_max_dim,
             )
+            self._loading_pending = True
+            self._loading_debounce.start()
             self.update()
             return
 
@@ -534,6 +545,13 @@ class VideoFrameWidget(QWidget):
         skipped intermediate frames), pack the requested seconds into a
         small per-seq dict here.
         """
+        # Stop the loading pill on any incoming frame (the stale-seq filter
+        # below decides whether to render this pixmap, but visually the load
+        # is finished regardless).
+        self._loading_pending = False
+        self._loading_debounce.stop()
+        self._loading_pill.stop()
+
         if seq != self._pending_seek_seq:
             return  # stale
         if img is None or img.isNull():
@@ -553,6 +571,20 @@ class VideoFrameWidget(QWidget):
         if seq != self._pending_seek_seq:
             return  # stale
         log.warning("async frame request seq=%d failed: %s", seq, message)
+
+    def _show_loading_pill(self) -> None:
+        if self._loading_pending:
+            self._loading_pill.start()
+            self._position_loading_pill()
+
+    def _position_loading_pill(self) -> None:
+        margin = 12
+        if self._loading_pill.isVisible():
+            self._loading_pill.adjustSize()
+        self._loading_pill.move(
+            self.width() - self._loading_pill.width() - margin,
+            self.height() - self._loading_pill.height() - margin,
+        )
 
     def _update_scaled_pixmap(self):
         # Frame pixmap is about to change. Any in-flight drag layer has the
@@ -1137,6 +1169,11 @@ class VideoFrameWidget(QWidget):
             # Frame
             if self._scaled_pixmap and not self._scaled_pixmap.isNull():
                 painter.drawPixmap(self._frame_x, self._frame_y, self._scaled_pixmap)
+            # If a frame is loading, dim the previous frame slightly so the
+            # user has a clear "this frame is stale" signal in addition to
+            # the pill.
+            if getattr(self, "_loading_pending", False):
+                painter.fillRect(self.rect(), QColor(0, 0, 0, int(255 * 0.08)))
             # All visible labels
             if self._visible_labels:
                 self._paint_labels(painter, draw_handles=True)
@@ -1211,6 +1248,7 @@ class VideoFrameWidget(QWidget):
         # widget pixmap cache since old entries are at the wrong resolution.
         self._recompute_target_max_dim()
         self._update_scaled_pixmap()
+        self._position_loading_pill()
         self.update()
 
     def _recompute_target_max_dim(self) -> None:
