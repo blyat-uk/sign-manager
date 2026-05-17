@@ -10,6 +10,7 @@ Spec: docs/superpowers/specs/2026-05-17-ui-refresh-design.md
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from PyQt6.QtGui import QIcon
 import qtawesome as qta
@@ -243,3 +244,37 @@ class Icons:
     @classmethod
     def app_logo(cls, color: str | None = None) -> QIcon:
         return cls._i("ph.text-aa-bold", color)
+
+
+def format_relative_time(then: datetime | None, *, now: datetime | None = None) -> str:
+    """Return short relative-time strings: '5m ago', 'yesterday', '3 wks', '1 mo'.
+
+    `then` and `now` may be timezone-aware or naive; naive datetimes are
+    assumed UTC. Returns '' for None input.
+    """
+    if then is None:
+        return ""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    delta = now - then
+    total_seconds = max(0, int(delta.total_seconds()))
+
+    if total_seconds < 60 * 60:
+        return f"{max(1, total_seconds // 60)}m ago"
+    if total_seconds < 24 * 60 * 60:
+        return f"{total_seconds // 3600}h ago"
+    if total_seconds < 48 * 60 * 60:
+        return "yesterday"
+    days = total_seconds // (24 * 60 * 60)
+    if days < 7:
+        return f"{days}d ago"
+    if days < 35:
+        weeks = days // 7
+        return f"{weeks} wk" if weeks == 1 else f"{weeks} wks"
+    months = days // 30
+    return f"{months} mo"

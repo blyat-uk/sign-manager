@@ -1,4 +1,5 @@
 import inspect
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -38,3 +39,24 @@ def test_icon_factory_produces_valid_icon(qapp, icon_name):
     factory = getattr(theme.Icons, icon_name)
     icon = factory()
     assert not icon.isNull(), f"Icons.{icon_name}() produced a null icon"
+
+
+def test_format_relative_time():
+    now = datetime(2026, 5, 17, 12, 0, 0, tzinfo=timezone.utc)
+    f = theme.format_relative_time
+
+    assert f(now - timedelta(minutes=5), now=now) == "5m ago"
+    assert f(now - timedelta(minutes=58), now=now) == "58m ago"
+    assert f(now - timedelta(hours=2), now=now) == "2h ago"
+    assert f(now - timedelta(hours=20), now=now) == "20h ago"
+    assert f(now - timedelta(hours=28), now=now) == "yesterday"
+    assert f(now - timedelta(days=2), now=now) == "2d ago"
+    assert f(now - timedelta(days=5), now=now) == "5d ago"
+    assert f(now - timedelta(days=10), now=now) == "1 wk"
+    assert f(now - timedelta(days=21), now=now) == "3 wks"
+    assert f(now - timedelta(days=40), now=now) == "1 mo"
+    assert f(now - timedelta(days=400), now=now) == "13 mo"
+
+
+def test_format_relative_time_handles_none():
+    assert theme.format_relative_time(None) == ""
