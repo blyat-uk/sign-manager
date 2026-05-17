@@ -13,6 +13,7 @@ authors = [{ name = "BuGiPoP" }]
 dependencies = [
     "PyQt6>=6.5",
     "python-mpv>=1.0.5",
+    "qtawesome>=1.2",
 ]
 
 [project.optional-dependencies]

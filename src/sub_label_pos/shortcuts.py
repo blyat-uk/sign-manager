@@ -32,3 +32,10 @@ PREV_FILE = QKeySequence("Ctrl+Shift+Left")
 # Text formatting (in inline editor)
 BOLD = QKeySequence(QKeySequence.StandardKey.Bold)         # Ctrl+B
 ITALIC = QKeySequence(QKeySequence.StandardKey.Italic)     # Ctrl+I
+
+# Gallery toggle
+TOGGLE_GALLERY = QKeySequence(Qt.Key.Key_G)
+
+# Per-label clipboard
+DUPLICATE = QKeySequence("Ctrl+D")
+PASTE_STYLE = QKeySequence("Ctrl+Shift+V")
