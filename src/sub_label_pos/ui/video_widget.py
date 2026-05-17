@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 from collections import OrderedDict
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
@@ -26,7 +27,7 @@ from sub_label_pos.geometry.rich_text import (
     parse_rich_text, segments_to_html, html_to_segments, segments_to_ass,
 )
 from sub_label_pos.model.ass_file import (
-    AssFile, LabelDialogue, _seconds_to_time,
+    AssFile, LabelDialogue, TextSegment, _seconds_to_time,
 )
 from sub_label_pos.model.label_store import LabelStore
 from sub_label_pos.model.types import LabelId
@@ -58,6 +59,51 @@ class _DragMode(Enum):
     MOVE = 1
     RESIZE = 2
     ROTATE = 3
+
+
+@dataclass
+class _LabelRenderCache:
+    """Precomputed paint-ready render data for one label.
+
+    Built lazily when paintEvent first needs the label; invalidated by the
+    same hooks as _rect_cache (per-id store mutations, structural changes,
+    file load, widget resize, ass swap, font-correction changes, and the
+    in-place drag/resize/rotate motion handlers).
+
+    The expensive bits cached here are:
+      - parse_rich_text + \\N segmentation into ``seg_lines``
+      - per-segment QFont (and the libass-correction-scaled QFontMetricsF
+        measurements derived from it)
+      - QPainterPath built at the origin via ``addText(0, 0, font, text)``
+        so paintEvent only needs to translate to the absolute baseline +
+        x offset before calling drawPath.
+
+    Things deliberately NOT cached (must be recomputed per paint because
+    they depend on per-paint widget state, not on label content):
+      - text_rect (derived from the cached _rect_cache rect, adjusted)
+      - per-line alignment x_offset (derived from h_align + line_w +
+        text_rect bounds)
+      - rotation transform (applied per paint with painter.save/restore)
+    """
+
+    # Per-line max height (used to space lines vertically).
+    line_max_heights: tuple[float, ...]
+    # Per-line total width (used by paintEvent for horizontal alignment).
+    line_widths: tuple[float, ...]
+    # One entry per segment, in draw order, holding everything needed to
+    # paint that segment relative to its containing line's origin:
+    #   li:                index into line_max_heights / line_widths
+    #   x_in_line:         x offset within the line (before alignment)
+    #   baseline_in_line:  baseline y offset within the line (0..max_line_h)
+    #   font:              QFont for this segment
+    #   path:              QPainterPath built at addText(0, 0, font, text);
+    #                      paintEvent translates to (line_x + x_in_line,
+    #                      line_y + baseline_in_line) before drawPath.
+    #   advance:           horizontal advance of this segment (unused at
+    #                      paint time but retained for diagnostics)
+    seg_render: tuple
+    # ASS horizontal alignment: 1=left, 2=center, 3=right.
+    h_align: int
 
 
 def _rotate_point(p: QPointF, center: QPointF, angle_deg: float) -> QPointF:
@@ -200,6 +246,11 @@ class VideoFrameWidget(QWidget):
         # swap, font-correction changes, and per-affected-id inside the
         # in-place drag/resize/rotate motion handlers.
         self._rect_cache: dict[LabelId, QRectF] = {}
+        # Parallel cache of paint-ready render data (parsed segments, fonts,
+        # QPainterPath objects). See _LabelRenderCache for details. Same
+        # invalidation lifecycle as _rect_cache -- every site that pops/
+        # clears _rect_cache must also pop/clear _render_cache.
+        self._render_cache: dict[LabelId, _LabelRenderCache] = {}
 
         # Frame display
         self._pixmap: QPixmap | None = None  # original resolution
@@ -271,6 +322,9 @@ class VideoFrameWidget(QWidget):
         # Rect cache is keyed by LabelId; on ass swap any stored rects refer
         # to the previous file's labels and resolutions and MUST be dropped.
         self._rect_cache.clear()
+        # Render cache holds QFont/QPainterPath built at the previous file's
+        # font sizes / resolutions -- drop it for the same reason.
+        self._render_cache.clear()
         # Selection is owned by the store; clearing on file change is the
         # store's job (LabelStore.load wipes selection). We just cancel any
         # in-progress edit.
@@ -287,6 +341,9 @@ class VideoFrameWidget(QWidget):
         and weight."""
         self._font_corrections.clear()
         self._rect_cache.clear()
+        # Render cache encodes QFont pixel sizes that bake in the libass
+        # correction factor -- it's also stale after a correction flush.
+        self._render_cache.clear()
 
     # --- Store signal slots ---------------------------------------------
 
@@ -296,24 +353,28 @@ class VideoFrameWidget(QWidget):
 
     def _on_store_labels_mutated(self, ids: set) -> None:
         """Store reported per-label property changes -- invalidate only those
-        ids in the rect cache, then refresh visible list and repaint."""
+        ids in the rect + render caches, then refresh visible list and
+        repaint."""
         for lid in ids:
             self._rect_cache.pop(lid, None)
+            self._render_cache.pop(lid, None)
         self._update_visible_labels(self._current_time)
         self.update()
 
     def _on_store_labels_structure_changed(self, _ids: set) -> None:
-        """Store reported labels added or removed -- flush the rect cache to
-        be safe (renumbering/reordering can confuse line_index-indexed paint
-        scratch dict), refresh visible list, and repaint."""
+        """Store reported labels added or removed -- flush the rect + render
+        caches to be safe (renumbering/reordering can confuse line_index-
+        indexed paint scratch dict), refresh visible list, and repaint."""
         self._rect_cache.clear()
+        self._render_cache.clear()
         self._update_visible_labels(self._current_time)
         self.update()
 
     def _on_store_file_loaded(self, _path: object) -> None:
-        """Store loaded a new file -- drop all cached rects; they referred
-        to the previous AssFile's geometry."""
+        """Store loaded a new file -- drop all cached rects + render data;
+        they referred to the previous AssFile's geometry and fonts."""
         self._rect_cache.clear()
+        self._render_cache.clear()
 
     # --- Selection helpers (read-through to the store) ------------------
 
@@ -747,6 +808,99 @@ class VideoFrameWidget(QWidget):
 
     # ── Painting ──
 
+    def _build_render_cache(self, label: LabelDialogue) -> _LabelRenderCache:
+        """Build a fresh :class:`_LabelRenderCache` for ``label``.
+
+        Does all the expensive per-segment work:
+          - parse_rich_text on label.rich_text
+          - split segments by ``\\N`` into per-line segment lists
+          - construct one QFont per segment via _font_for_label
+          - measure each segment with QFontMetricsF for line_w, max_line_h,
+            and the per-segment baseline offset
+          - build a QPainterPath per segment via addText(0, 0, font, text)
+
+        paintEvent then only needs to compute the per-line alignment offset
+        from the cached line widths and translate before drawPath -- no
+        measurement, no path building per paint.
+        """
+        font_name, base_size, default_bold, default_italic = self._style_for_label(label)
+        segments = parse_rich_text(label.rich_text, default_bold, default_italic)
+
+        # Split segments by \N into per-line segment lists.
+        seg_lines: list[list[TextSegment]] = [[]]
+        for seg in segments:
+            parts = seg.text.split("\\N")
+            for pi, part in enumerate(parts):
+                if pi > 0:
+                    seg_lines.append([])
+                if part:
+                    seg_lines[-1].append(TextSegment(part, seg.bold, seg.italic))
+
+        # Per-segment QFont — also lets us derive per-line max height in one
+        # sweep without a second pass. Fall back to the label's default font
+        # for the initial max_line_h baseline (matches paintEvent's prior
+        # behaviour where an empty line still consumed a line height).
+        default_font = self._font_for_label(label)
+        default_h = QFontMetricsF(default_font).height()
+
+        # First pass: per-segment font + metrics -> per-line max height +
+        # per-segment (font, fm) tuples we can reuse for measurement.
+        line_max_heights: list[float] = []
+        per_line_seg_info: list[list[tuple[TextSegment, QFont, QFontMetricsF]]] = []
+        for seg_line in seg_lines:
+            seg_info: list[tuple[TextSegment, QFont, QFontMetricsF]] = []
+            max_h = default_h
+            for seg in seg_line:
+                seg_font = self._font_for_label(
+                    label, bold_override=seg.bold, italic_override=seg.italic,
+                )
+                seg_fm = QFontMetricsF(seg_font)
+                seg_info.append((seg, seg_font, seg_fm))
+                h = seg_fm.height()
+                if h > max_h:
+                    max_h = h
+            line_max_heights.append(max_h)
+            per_line_seg_info.append(seg_info)
+
+        # Second pass: per-line width + per-segment render record.
+        line_widths: list[float] = []
+        seg_render: list[tuple[int, float, float, QFont, QPainterPath, float]] = []
+        for li, seg_info in enumerate(per_line_seg_info):
+            max_line_h = line_max_heights[li]
+            x_in_line = 0.0
+            for seg, seg_font, seg_fm in seg_info:
+                advance = seg_fm.horizontalAdvance(seg.text)
+                # Baseline math mirrors the pre-cache paintEvent exactly:
+                #   baseline_y = y_pos + (max_line_h + ascent - descent) / 2
+                # Cached relative to the line origin (subtract y_pos).
+                baseline_in_line = (max_line_h + seg_fm.ascent() - seg_fm.descent()) / 2
+
+                path = QPainterPath()
+                # Build path at the origin so paintEvent can translate to
+                # the absolute (line_x + x_in_line, line_y + baseline_in_line)
+                # via painter.translate before drawPath.
+                path.addText(0.0, 0.0, seg_font, seg.text)
+
+                seg_render.append(
+                    (li, x_in_line, baseline_in_line, seg_font, path, advance)
+                )
+                x_in_line += advance
+            line_widths.append(x_in_line)
+
+        alignment = (
+            label.alignment
+            if label.alignment is not None
+            else (self._ass.label_alignment if self._ass else 2)
+        )
+        h_align = ((alignment - 1) % 3) + 1  # 1=left, 2=center, 3=right
+
+        return _LabelRenderCache(
+            line_max_heights=tuple(line_max_heights),
+            line_widths=tuple(line_widths),
+            seg_render=tuple(seg_render),
+            h_align=h_align,
+        )
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -807,65 +961,44 @@ class VideoFrameWidget(QWidget):
                     (style.outline_width if style else 2.0)
                 )
 
-                # Segment-aware multi-line rendering
-                font_name, base_size, default_bold, default_italic = self._style_for_label(label)
-                segments = parse_rich_text(label.rich_text, default_bold, default_italic)
+                # Segment-aware multi-line rendering — uses the cached
+                # per-label render data so paintEvent does zero measurement
+                # and zero path-building per frame.
+                lid = label.label_id
+                render = self._render_cache.get(lid) if lid else None
+                if render is None:
+                    render = self._build_render_cache(label)
+                    if lid:
+                        self._render_cache[lid] = render
 
-                # Split segments by \N into lines
-                from sub_label_pos.model.ass_file import TextSegment
-                seg_lines: list[list[TextSegment]] = [[]]
-                for seg in segments:
-                    parts = seg.text.split("\\N")
-                    for pi, part in enumerate(parts):
-                        if pi > 0:
-                            seg_lines.append([])
-                        if part:
-                            seg_lines[-1].append(TextSegment(part, seg.bold, seg.italic))
-
-                # Compute max line height
-                max_line_h = QFontMetricsF(font).height()
-                for seg_line in seg_lines:
-                    for seg in seg_line:
-                        seg_font = self._font_for_label(label, bold_override=seg.bold, italic_override=seg.italic)
-                        max_line_h = max(max_line_h, QFontMetricsF(seg_font).height())
-
-                alignment = label.alignment if label.alignment is not None else (self._ass.label_alignment if self._ass else 2)
-                h_align = ((alignment - 1) % 3) + 1  # 1=left, 2=center, 3=right
-
-                for li, seg_line in enumerate(seg_lines):
-                    # Measure total line width for alignment
-                    line_w = 0.0
-                    for seg in seg_line:
-                        seg_font = self._font_for_label(label, bold_override=seg.bold, italic_override=seg.italic)
-                        line_w += QFontMetricsF(seg_font).horizontalAdvance(seg.text)
-
+                h_align = render.h_align
+                for li, x_in_line, baseline_in_line, seg_font, path, _advance in render.seg_render:
+                    line_w = render.line_widths[li]
+                    max_line_h = render.line_max_heights[li]
                     if h_align == 1:
-                        x_offset = text_rect.x()
+                        line_x = text_rect.x()
                     elif h_align == 3:
-                        x_offset = text_rect.right() - line_w
+                        line_x = text_rect.right() - line_w
                     else:
-                        x_offset = text_rect.x() + (text_rect.width() - line_w) / 2
-                    y_pos = text_rect.y() + li * max_line_h
+                        line_x = text_rect.x() + (text_rect.width() - line_w) / 2
+                    line_y = text_rect.y() + li * max_line_h
+                    abs_x = line_x + x_in_line
+                    abs_y = line_y + baseline_in_line
 
-                    for seg in seg_line:
-                        seg_font = self._font_for_label(label, bold_override=seg.bold, italic_override=seg.italic)
-                        seg_fm = QFontMetricsF(seg_font)
-                        seg_w = seg_fm.horizontalAdvance(seg.text)
-                        baseline_y = y_pos + (max_line_h + seg_fm.ascent() - seg_fm.descent()) / 2
-
-                        path = QPainterPath()
-                        path.addText(x_offset, baseline_y, seg_font, seg.text)
-
-                        if outline_width > 0:
-                            painter.setPen(QPen(outline_colour, outline_width * 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-                            painter.setBrush(Qt.BrushStyle.NoBrush)
-                            painter.drawPath(path)
-
-                        painter.setPen(Qt.PenStyle.NoPen)
-                        painter.setBrush(text_colour)
+                    # Path was built at (0, 0); translate to the absolute
+                    # baseline + x position, draw, then translate back.
+                    # painter.save/restore would also work but a paired
+                    # translate avoids the state-stack push/pop overhead.
+                    painter.translate(abs_x, abs_y)
+                    if outline_width > 0:
+                        painter.setPen(QPen(outline_colour, outline_width * 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                        painter.setBrush(Qt.BrushStyle.NoBrush)
                         painter.drawPath(path)
 
-                        x_offset += seg_w
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(text_colour)
+                    painter.drawPath(path)
+                    painter.translate(-abs_x, -abs_y)
 
                 if rotation != 0:
                     painter.restore()
@@ -911,6 +1044,10 @@ class VideoFrameWidget(QWidget):
         # pixel-size scaling and _ass_to_widget's mapping. Any widget resize
         # changes both, so the entire rect cache is stale.
         self._rect_cache.clear()
+        # Render cache encodes QFont objects at a specific pixel size and
+        # QPainterPath objects measured at those font sizes -- a resize
+        # changes the scale factor, so every cached entry is invalid.
+        self._render_cache.clear()
         # Recompute the editor extraction target. Rounded to the nearest
         # 256 so continuous resize gestures don't fragment the (max_dim-keyed)
         # cache. When the target shifts by a meaningful amount, drop the
@@ -1161,7 +1298,9 @@ class VideoFrameWidget(QWidget):
         # In-place mutation of LabelDialogue.pos_x/pos_y below bypasses
         # store signals (per Issue 4) — we must invalidate the rect cache
         # for the primary so the tentative compute_label_rect call below
-        # actually recomputes (and stores the fresh value).
+        # actually recomputes (and stores the fresh value). Pos changes
+        # do NOT affect per-segment text layout (fonts, paths, line widths
+        # all stay identical), so the render cache is intentionally kept.
         if primary.label_id:
             self._rect_cache.pop(primary.label_id, None)
 
@@ -1264,6 +1403,7 @@ class VideoFrameWidget(QWidget):
         # Apply delta to all selected labels, invalidating each one's rect
         # cache entry because the in-place pos_x/pos_y mutation here does
         # not fire labels_mutated -- the next paint must recompute rects.
+        # Render cache is kept: position changes don't affect text layout.
         for lb in self.selected_labels():
             lb_init_x, lb_init_y = self._multi_drag_initial.get(
                 lb.line_index, (lb.pos_x, lb.pos_y)
@@ -1309,9 +1449,12 @@ class VideoFrameWidget(QWidget):
         # _finish_resize.
         label.font_size = new_fs
         # In-place font_size mutation bypasses store signals; invalidate the
-        # rect cache for this label so the next paint recomputes geometry.
+        # rect AND render caches for this label so the next paint recomputes
+        # geometry (font_size scales QFont pixel sizes, which changes both
+        # the rect and every cached QPainterPath).
         if label.label_id:
             self._rect_cache.pop(label.label_id, None)
+            self._render_cache.pop(label.label_id, None)
         self.update()
 
     def _finish_resize(self):
@@ -1340,6 +1483,9 @@ class VideoFrameWidget(QWidget):
         label.rotation = new_rotation
         # In-place rotation mutation bypasses store signals; invalidate the
         # rect cache for this label so the next paint recomputes geometry.
+        # Render cache is kept: rotation is applied via painter transform,
+        # not baked into the QPainterPath geometry, so cached paths stay
+        # valid across rotation changes.
         if label.label_id:
             self._rect_cache.pop(label.label_id, None)
         self.update()
