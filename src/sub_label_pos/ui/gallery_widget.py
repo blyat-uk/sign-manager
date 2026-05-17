@@ -696,11 +696,16 @@ class GalleryPanel(QWidget):
             styles=dict(self._ass.styles),
             font_corrections=dict(getattr(self, '_font_corrections', {})),
         )
-        self._thumb_thread = QThread()
+        # Parent thread to self so Qt owns it; PyQt won't garbage-collect
+        # while the underlying OS thread is still running. deleteLater on
+        # finished cleans both up asynchronously when work completes.
+        self._thumb_thread = QThread(self)
         self._thumb_worker.moveToThread(self._thumb_thread)
         self._thumb_thread.started.connect(self._thumb_worker.run)
         self._thumb_worker.thumbnail_ready.connect(self._on_thumbnail_ready)
         self._thumb_worker.finished.connect(self._thumb_thread.quit)
+        self._thumb_worker.finished.connect(self._thumb_worker.deleteLater)
+        self._thumb_thread.finished.connect(self._thumb_thread.deleteLater)
         self._thumb_thread.start()
 
     def _on_thumbnail_ready(self, index: int, image: QImage):
@@ -709,11 +714,19 @@ class GalleryPanel(QWidget):
             self._thumbnails[index].set_pixmap(pm)
 
     def _cancel_loading(self):
+        """Signal the in-flight worker to stop and drop our references.
+
+        Does NOT wait synchronously: ffmpeg's per-frame subprocess call can
+        take longer than the wait timeout, and replacing the QThread Python
+        ref before the OS thread finishes triggers a 'Destroyed while
+        running' abort. With the thread parented to self and deleteLater on
+        finished, the orphaned thread cleans itself up once ffmpeg returns.
+        Use :meth:`shutdown` to wait synchronously at app close.
+        """
         if self._thumb_worker:
             self._thumb_worker.cancel()
-        if self._thumb_thread and self._thumb_thread.isRunning():
+        if self._thumb_thread:
             self._thumb_thread.quit()
-            self._thumb_thread.wait(2000)
         self._thumb_worker = None
         self._thumb_thread = None
 
@@ -743,11 +756,13 @@ class GalleryPanel(QWidget):
             styles=dict(self._ass.styles),
             font_corrections=dict(getattr(self, '_font_corrections', {})),
         )
-        self._single_thread = QThread()
+        self._single_thread = QThread(self)
         self._single_worker.moveToThread(self._single_thread)
         self._single_thread.started.connect(self._single_worker.run)
         self._single_worker.thumbnail_ready.connect(self._on_single_thumbnail_ready)
         self._single_worker.finished.connect(self._single_thread.quit)
+        self._single_worker.finished.connect(self._single_worker.deleteLater)
+        self._single_thread.finished.connect(self._single_thread.deleteLater)
         self._single_thread.start()
 
     def _on_single_thumbnail_ready(self, index: int, image: QImage):
@@ -756,13 +771,29 @@ class GalleryPanel(QWidget):
             self._thumbnails[index].set_pixmap(pm)
 
     def _cancel_single_refresh(self):
+        """Signal the in-flight worker to stop and drop our references.
+        See _cancel_loading for the rationale. Use :meth:`shutdown` at app
+        close to wait for completion."""
         if self._single_worker:
             self._single_worker.cancel()
-        if self._single_thread and self._single_thread.isRunning():
+        if self._single_thread:
             self._single_thread.quit()
-            self._single_thread.wait(2000)
         self._single_worker = None
         self._single_thread = None
+
+    def shutdown(self, wait_ms: int = 5000) -> None:
+        """Wait synchronously for all in-flight thumbnail threads.
+
+        Must be called before the gallery widget is destroyed (e.g. from
+        MainWindow.closeEvent). Any thread still running when the widget is
+        torn down causes a 'QThread: Destroyed while running' abort.
+        """
+        self._cancel_loading()
+        self._cancel_single_refresh()
+        for thread in self.findChildren(QThread):
+            if thread.isRunning():
+                thread.quit()
+                thread.wait(wait_ms)
 
     def select_group(self, index: int):
         if self._selected_index >= 0 and self._selected_index < len(self._thumbnails):

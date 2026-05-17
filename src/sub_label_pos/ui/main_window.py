@@ -1915,8 +1915,7 @@ class MainWindow(QMainWindow):
                 return
         self._cancel_folder_preload()
         self._file_loader.shutdown()
-        self._gallery._cancel_loading()
-        self._gallery._cancel_single_refresh()
+        self._gallery.shutdown()
         self._mpv_widget.shutdown()
         self._player.shutdown()
         self._frame_queue.shutdown()

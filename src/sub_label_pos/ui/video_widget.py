@@ -1272,11 +1272,16 @@ class VideoFrameWidget(QWidget):
         self._prefetch_worker = FramePrefetchWorker(
             self._video_service, self._video_path, times,
         )
-        self._prefetch_thread = QThread()
+        # Parent thread to self so Qt (not Python GC) controls its lifetime;
+        # deleteLater on finished frees both asynchronously once ffmpeg
+        # returns. Avoids 'QThread destroyed while running' on rapid cancel.
+        self._prefetch_thread = QThread(self)
         self._prefetch_worker.moveToThread(self._prefetch_thread)
         self._prefetch_thread.started.connect(self._prefetch_worker.run)
         self._prefetch_worker.frame_ready.connect(self._on_prefetch_frame)
         self._prefetch_worker.finished.connect(self._prefetch_thread.quit)
+        self._prefetch_worker.finished.connect(self._prefetch_worker.deleteLater)
+        self._prefetch_thread.finished.connect(self._prefetch_thread.deleteLater)
         self._prefetch_thread.start()
 
     def _on_prefetch_frame(self, cs_key: int, pixmap: QPixmap) -> None:
@@ -1286,15 +1291,29 @@ class VideoFrameWidget(QWidget):
                 self._cache.popitem(last=False)
 
     def _cancel_prefetch(self) -> None:
+        """Signal in-flight prefetch to stop and drop our references.
+
+        Does NOT wait synchronously: ffmpeg's per-frame subprocess can take
+        longer than any reasonable wait, and replacing the QThread Python
+        ref before the OS thread finishes triggers a 'Destroyed while
+        running' abort. With the thread parented to self and deleteLater
+        on finished, the orphaned thread cleans itself up once ffmpeg
+        returns. Use :meth:`shutdown` to wait synchronously at app close.
+        """
         if self._prefetch_worker:
             self._prefetch_worker.cancel()
-        if self._prefetch_thread and self._prefetch_thread.isRunning():
+        if self._prefetch_thread:
             self._prefetch_thread.quit()
-            self._prefetch_thread.wait(2000)
         self._prefetch_worker = None
         self._prefetch_thread = None
 
     def shutdown(self):
         self._cancel_prefetch()
         self._cancel_editing()
+        # Wait for any in-flight thread (current + any orphaned-and-pending
+        # from previous cancels) to finish before the widget is destroyed.
+        for thread in self.findChildren(QThread):
+            if thread.isRunning():
+                thread.quit()
+                thread.wait(5000)
         self._cache.clear()
