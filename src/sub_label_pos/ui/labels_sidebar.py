@@ -222,6 +222,12 @@ class LabelsSidebar(QWidget):
 
         # List
         self._list = QListWidget()
+        # Click → row_clicked. itemActivated covers Enter on focused row.
+        self._list.itemClicked.connect(self._on_item_clicked)
+        self._list.itemActivated.connect(self._on_item_clicked)
+        # Right-click → context menu.
+        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._on_list_context_menu)
         self._list.setStyleSheet(
             f"QListWidget {{ background: {theme.Tokens.bg_deepest}; "
             f"border: none; outline: none; }}"
@@ -292,6 +298,53 @@ class LabelsSidebar(QWidget):
             self._count_label.setText(f"· {visible} / {total}")
         else:
             self._count_label.setText(f"· {total}")
+
+    def _row_for_item(self, item) -> LabelGroupRow | None:
+        if item is None:
+            return None
+        idx = self._list.row(item)
+        if 0 <= idx < len(self._rows):
+            return self._rows[idx]
+        return None
+
+    def _on_item_clicked(self, item) -> None:
+        row = self._row_for_item(item)
+        if row is not None:
+            self.row_clicked.emit(row)
+
+    def _on_list_context_menu(self, pos) -> None:
+        from PyQt6.QtWidgets import QMenu
+        item = self._list.itemAt(pos)
+        row = self._row_for_item(item)
+        if row is None:
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            f"QMenu {{ background: {theme.Tokens.bg_raised}; "
+            f"color: {theme.Tokens.text_primary}; "
+            f"border: 1px solid {theme.Tokens.border_strong}; "
+            f"border-radius: 6px; padding: 4px 0; font-size: 11.5px; }}"
+            f"QMenu::item {{ padding: 5px 28px 5px 12px; }}"
+            f"QMenu::item:selected {{ background: {theme.Tokens.bg_hover}; "
+            f"color: {theme.Tokens.text_emphasis}; }}"
+            f"QMenu::separator {{ height: 1px; background: {theme.Tokens.border}; "
+            f"margin: 4px 0; }}"
+        )
+        act_edit = menu.addAction(theme.Icons.edit_text(), "Edit text")
+        act_edit.triggered.connect(
+            lambda: self.row_edit_requested.emit(row.labels[0])
+        )
+        act_jump = menu.addAction(theme.Icons.time(), "Jump to time")
+        act_jump.triggered.connect(lambda: self.row_jump_requested.emit(row))
+        menu.addSeparator()
+        act_del = menu.addAction(
+            theme.Icons.delete(color=theme.Tokens.danger),
+            "Delete" if len(row.labels) == 1 else f"Delete all {len(row.labels)} labels",
+        )
+        act_del.triggered.connect(
+            lambda: self.row_delete_requested.emit(row.labels)
+        )
+        menu.exec(self._list.mapToGlobal(pos))
 
     def showEvent(self, event):
         super().showEvent(event)
