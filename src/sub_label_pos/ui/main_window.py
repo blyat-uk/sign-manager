@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QPushButton,
+    QProgressBar,
     QStackedWidget,
     QStyle,
     QDialog,
@@ -318,6 +319,49 @@ class FolderPreloadWorker(QObject):
         self._pool.waitForDone(3000)
 
 
+class _FileRowWidget(QWidget):
+    """Sidebar file row: [status dot] filename."""
+
+    READY = "ready"
+    PENDING = "pending"
+
+    def __init__(self, filename: str, parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 3, 8, 3)
+        layout.setSpacing(7)
+
+        self._dot = QLabel()
+        self._dot.setFixedSize(8, 8)
+        self._name = QLabel(filename)
+        self._name.setStyleSheet(
+            f"color: {theme.Tokens.text_primary}; font-size: 11px; background: transparent;"
+        )
+        layout.addWidget(self._dot)
+        layout.addWidget(self._name, 1)
+
+        self._state = self.PENDING
+        self._apply_dot()
+
+    def set_state(self, state: str) -> None:
+        if self._state == state:
+            return
+        self._state = state
+        self._apply_dot()
+
+    def _apply_dot(self) -> None:
+        if self._state == self.READY:
+            self._dot.setStyleSheet(
+                f"background: {theme.Tokens.accent}; border-radius: 4px;"
+            )
+        else:
+            self._dot.setStyleSheet(
+                f"background: transparent; "
+                f"border: 1px solid {theme.Tokens.border_strong}; "
+                f"border-radius: 4px;"
+            )
+
+
 class WelcomeWidget(QWidget):
     """Start screen shown when no file is loaded."""
 
@@ -600,42 +644,66 @@ class MainWindow(QMainWindow):
         # Folder pre-loading
         self._preloaded: dict[str, PreloadedFileData] = {}
         self._preload_worker: FolderPreloadWorker | None = None
+        self._file_row_widgets: dict[str, _FileRowWidget] = {}
 
         # ── Files sidebar (hidden by default) ──
         self._files_dock = QDockWidget("Files", self)
-        self._files_dock.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        self._files_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
         dock_content = QWidget()
+        dock_content.setStyleSheet(f"background: {theme.Tokens.bg_deepest};")
         dock_layout = QVBoxLayout(dock_content)
         dock_layout.setContentsMargins(6, 6, 6, 6)
         dock_layout.setSpacing(4)
+
         self._folder_path_label = QLabel()
-        self._folder_path_label.setStyleSheet("color: #888; font-size: 11px;")
+        self._folder_path_label.setStyleSheet(
+            f"color: {theme.Tokens.text_muted}; font-size: 11px; background: transparent;"
+        )
         self._folder_path_label.setWordWrap(False)
         dock_layout.addWidget(self._folder_path_label)
+
         self._folder_progress_label = QLabel()
-        self._folder_progress_label.setStyleSheet("color: #ccc; font-size: 12px;")
+        self._folder_progress_label.setStyleSheet(
+            f"color: {theme.Tokens.text_primary}; font-size: 11px; background: transparent;"
+        )
         dock_layout.addWidget(self._folder_progress_label)
+
+        # Hair-line preload progress bar
+        self._preload_bar = QProgressBar()
+        self._preload_bar.setFixedHeight(2)
+        self._preload_bar.setTextVisible(False)
+        self._preload_bar.setRange(0, 100)
+        self._preload_bar.setValue(0)
+        self._preload_bar.setStyleSheet(
+            f"QProgressBar {{ background: {theme.Tokens.border}; border: none; }}"
+            f"QProgressBar::chunk {{ background: {theme.Tokens.accent}; }}"
+        )
+        self._preload_bar.hide()
+        dock_layout.addWidget(self._preload_bar)
+
         self._file_list = QListWidget()
-        self._file_list.setStyleSheet("""
-            QListWidget {
-                background: #252525;
-                color: #ccc;
-                border: none;
-                font-size: 12px;
-            }
-            QListWidget::item {
-                padding: 4px 6px;
-            }
-            QListWidget::item:selected {
-                background: #4a9eff;
-                color: #fff;
-            }
+        self._file_list.setStyleSheet(f"""
+            QListWidget {{
+                background: {theme.Tokens.bg_surface};
+                color: {theme.Tokens.text_primary};
+                border: 1px solid {theme.Tokens.border};
+                border-radius: 5px;
+                font-size: 11px;
+                outline: none;
+            }}
+            QListWidget::item {{ padding: 0; }}
+            QListWidget::item:selected {{
+                background: {theme.Tokens.accent_deep};
+                color: {theme.Tokens.text_emphasis};
+            }}
         """)
         dock_layout.addWidget(self._file_list)
-        dock_content.setStyleSheet("background: #2d2d2d;")
+
         self._files_dock.setWidget(dock_content)
-        self._files_dock.setMinimumWidth(180)
-        self._files_dock.setMaximumWidth(320)
+        self._files_dock.setMinimumWidth(200)
+        self._files_dock.setMaximumWidth(360)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self._files_dock)
         self._files_dock.hide()
         self._file_list.currentRowChanged.connect(self._on_file_list_clicked)
@@ -1179,10 +1247,22 @@ class MainWindow(QMainWindow):
         self._folder_path_label.setText(folder)
         self._file_list.blockSignals(True)
         self._file_list.clear()
+        self._file_row_widgets = {}
         for f in files:
-            self._file_list.addItem(Path(f).name)
+            row = _FileRowWidget(Path(f).name)
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(0, 26))
+            item.setData(Qt.ItemDataRole.UserRole, f)
+            self._file_list.addItem(item)
+            self._file_list.setItemWidget(item, row)
+            self._file_row_widgets[f] = row
         self._file_list.blockSignals(False)
         self._files_dock.show()
+        # Show progress bar at 0% before preload starts
+        if self._folder_files:
+            self._preload_bar.setRange(0, len(self._folder_files))
+            self._preload_bar.setValue(0)
+            self._preload_bar.show()
         self._switch_to_file(0)
         # Start pre-loading all files in background
         self._start_folder_preload(files)
@@ -1268,16 +1348,24 @@ class MainWindow(QMainWindow):
         if not isinstance(data, PreloadedFileData):
             return
         self._preloaded[path] = data
-        # Update sidebar to indicate ready (green text)
-        for i, f in enumerate(self._folder_files):
-            if f == path:
-                item = self._file_list.item(i)
-                if item:
-                    item.setForeground(QColor("#6fc276"))
-                break
+        # Mark status dot READY
+        row = self._file_row_widgets.get(path)
+        if row is not None:
+            row.set_state(_FileRowWidget.READY)
+        # Bump progress bar
+        if self._folder_files:
+            ready = sum(
+                1 for r in self._file_row_widgets.values()
+                if r._state == _FileRowWidget.READY
+            )
+            total = len(self._folder_files)
+            self._preload_bar.setRange(0, total)
+            self._preload_bar.setValue(ready)
+            self._preload_bar.show()
 
     def _on_preload_done(self) -> None:
         _status_msg(self, "Folder pre-loading complete")
+        self._preload_bar.hide()
 
     def _cancel_folder_preload(self) -> None:
         if self._preload_worker:
