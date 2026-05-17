@@ -552,7 +552,11 @@ class WelcomeWidget(QWidget):
             self._list.addItem(item)
             self._list.setItemWidget(item, widget)
 
-    def _on_item_activated(self, item: QListWidgetItem) -> None:
+    def _on_item_activated(self, item: QListWidgetItem | None) -> None:
+        # itemActivated can fire without a current item in some keyboard
+        # scenarios (e.g. Enter on an empty selection); guard before deref.
+        if item is None:
+            return
         path = item.data(Qt.ItemDataRole.UserRole)
         if path:
             self.recent_directory_clicked.emit(path)
