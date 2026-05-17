@@ -124,3 +124,138 @@ def test_render_cache_cleared_on_file_load(qapp):
     # Reload — should clear
     store.load(ass, source_path=fixture)
     assert len(w._render_cache) == 0
+
+
+def test_drag_layer_starts_none(qapp):
+    """Issue M: drag layer defaults to empty / no dragged ids."""
+    from sub_label_pos.ui.video_widget import VideoFrameWidget
+    store = LabelStore()
+    fq = _FakeFrameQueue()
+    w = VideoFrameWidget(store, _FakeSvc(), frame_queue=fq, frame_cache_size=4)
+    assert w._drag_layer is None
+    assert w._drag_layer_dragged_ids == frozenset()
+
+
+def test_drag_layer_invalidates_on_scaled_pixmap_change(qapp):
+    """Issue M: changing the frame pixmap clears the stale drag layer."""
+    from sub_label_pos.ui.video_widget import VideoFrameWidget
+    from PyQt6.QtGui import QPixmap
+    store = LabelStore()
+    fq = _FakeFrameQueue()
+    w = VideoFrameWidget(store, _FakeSvc(), frame_queue=fq, frame_cache_size=4)
+    # Stub a layer + dragged set so we can observe invalidation.
+    w._drag_layer = QPixmap(100, 100)
+    w._drag_layer_dragged_ids = frozenset({"x"})
+    # Set a fake pixmap and call _update_scaled_pixmap; layer should clear.
+    w._pixmap = QPixmap(800, 450)
+    w.resize(800, 450)
+    w._update_scaled_pixmap()
+    assert w._drag_layer is None
+    assert w._drag_layer_dragged_ids == frozenset()
+
+
+def test_drag_layer_invalidates_on_file_load(qapp):
+    """Issue M: loading a new file drops the stale drag layer."""
+    from pathlib import Path
+    from sub_label_pos.ui.video_widget import VideoFrameWidget
+    from sub_label_pos.model.ass_file import AssFile
+    from PyQt6.QtGui import QPixmap
+    store = LabelStore()
+    fq = _FakeFrameQueue()
+    w = VideoFrameWidget(store, _FakeSvc(), frame_queue=fq, frame_cache_size=4)
+    w._drag_layer = QPixmap(100, 100)
+    w._drag_layer_dragged_ids = frozenset({"x"})
+    fixture = Path(__file__).parent.parent / "fixtures" / "sample.ass"
+    store.load(AssFile.from_path(fixture), source_path=fixture)
+    assert w._drag_layer is None
+    assert w._drag_layer_dragged_ids == frozenset()
+
+
+def test_drag_layer_invalidates_on_set_ass(qapp):
+    """Issue M: swapping the AssFile drops the stale drag layer."""
+    from pathlib import Path
+    from sub_label_pos.ui.video_widget import VideoFrameWidget
+    from sub_label_pos.model.ass_file import AssFile
+    from PyQt6.QtGui import QPixmap
+    store = LabelStore()
+    fq = _FakeFrameQueue()
+    w = VideoFrameWidget(store, _FakeSvc(), frame_queue=fq, frame_cache_size=4)
+    w._drag_layer = QPixmap(100, 100)
+    w._drag_layer_dragged_ids = frozenset({"x"})
+    fixture = Path(__file__).parent.parent / "fixtures" / "sample.ass"
+    w.set_ass(AssFile.from_path(fixture))
+    assert w._drag_layer is None
+    assert w._drag_layer_dragged_ids == frozenset()
+
+
+def test_drag_layer_invalidates_on_resize(qapp):
+    """Issue M: widget resize invalidates the drag layer explicitly."""
+    from sub_label_pos.ui.video_widget import VideoFrameWidget
+    from PyQt6.QtGui import QPixmap
+    from PyQt6.QtCore import QSize
+    from PyQt6.QtGui import QResizeEvent
+    store = LabelStore()
+    fq = _FakeFrameQueue()
+    w = VideoFrameWidget(store, _FakeSvc(), frame_queue=fq, frame_cache_size=4)
+    w._drag_layer = QPixmap(100, 100)
+    w._drag_layer_dragged_ids = frozenset({"x"})
+    # Invoke resizeEvent directly -- the QWidget.resize() call doesn't fire
+    # resizeEvent until the widget is shown / laid out by the event loop.
+    w.resizeEvent(QResizeEvent(QSize(900, 500), QSize(800, 450)))
+    assert w._drag_layer is None
+    assert w._drag_layer_dragged_ids == frozenset()
+
+
+def test_drag_layer_kept_when_only_dragged_id_mutated(qapp):
+    """Issue M: mutations on the dragged id alone do NOT invalidate the layer
+    (the layer caches everything OTHER than the dragged labels)."""
+    from sub_label_pos.ui.video_widget import VideoFrameWidget
+    from PyQt6.QtGui import QPixmap
+    store = LabelStore()
+    fq = _FakeFrameQueue()
+    w = VideoFrameWidget(store, _FakeSvc(), frame_queue=fq, frame_cache_size=4)
+    sentinel = QPixmap(100, 100)
+    w._drag_layer = sentinel
+    w._drag_layer_dragged_ids = frozenset({"dragged"})
+    # Fire the slot directly with a set containing only the dragged id.
+    w._on_store_labels_mutated({"dragged"})
+    assert w._drag_layer is sentinel
+    assert w._drag_layer_dragged_ids == frozenset({"dragged"})
+
+
+def test_frame_prefetch_worker_threads_max_dim(qapp, tmp_path):
+    """Fix 1: FramePrefetchWorker passes max_dim through to get_frame so
+    prefetched pixmaps live in the same downscaled bucket as the editor's
+    sync/async paths."""
+    from sub_label_pos.ui.video_widget import FramePrefetchWorker
+
+    calls: list[tuple] = []
+
+    class _RecordingSvc:
+        def get_frame(self, path, t, *, max_dim=None, jpeg_quality=None):
+            calls.append((path, t, max_dim))
+            return None
+
+    worker = FramePrefetchWorker(
+        _RecordingSvc(), str(tmp_path / "fake.mkv"), [0.0, 0.04, 0.08],
+        max_dim=1280,
+    )
+    worker.run()
+    assert calls, "worker should have called get_frame"
+    assert all(c[2] == 1280 for c in calls), \
+        f"every prefetch call should request max_dim=1280, got {calls}"
+
+
+def test_drag_layer_invalidated_when_non_dragged_id_mutated(qapp):
+    """Issue M: mutations on a non-dragged id mid-gesture invalidate the
+    layer so the next paintEvent rebuilds it with the fresh appearance."""
+    from sub_label_pos.ui.video_widget import VideoFrameWidget
+    from PyQt6.QtGui import QPixmap
+    store = LabelStore()
+    fq = _FakeFrameQueue()
+    w = VideoFrameWidget(store, _FakeSvc(), frame_queue=fq, frame_cache_size=4)
+    w._drag_layer = QPixmap(100, 100)
+    w._drag_layer_dragged_ids = frozenset({"dragged"})
+    w._on_store_labels_mutated({"other"})
+    assert w._drag_layer is None
+    assert w._drag_layer_dragged_ids == frozenset()

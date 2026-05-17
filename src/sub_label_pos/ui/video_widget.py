@@ -153,11 +153,12 @@ class FramePrefetchWorker(QObject):
     frame_ready = pyqtSignal(int, QPixmap)  # cs_key, pixmap
     finished = pyqtSignal()
 
-    def __init__(self, video_service: VideoService, video_path: str, times: list[float]):
+    def __init__(self, video_service: VideoService, video_path: str, times: list[float], *, max_dim: int | None = None):
         super().__init__()
         self._svc = video_service
         self._video_path = video_path
         self._times = times
+        self._max_dim = max_dim
         self._cancelled = False
 
     def cancel(self):
@@ -169,7 +170,7 @@ class FramePrefetchWorker(QObject):
             if self._cancelled:
                 break
             try:
-                img = self._svc.get_frame(p, t)
+                img = self._svc.get_frame(p, t, max_dim=self._max_dim)
             except VideoServiceError as e:
                 log.warning("prefetch get_frame failed for %s @ %s: %s",
                             self._video_path, t, e)
@@ -316,6 +317,16 @@ class VideoFrameWidget(QWidget):
         self._prefetch_worker: FramePrefetchWorker | None = None
         self._prefetched_times: set[int] = set()  # cs_keys of center times already prefetched
 
+        # Drag layer: pre-composited "frame + non-dragged labels" pixmap built
+        # at the start of a drag/resize/rotate gesture so each mousemove paint
+        # only needs drawPixmap(layer) + drawPath(dragged label) rather than
+        # re-rendering every visible label every frame. Invalidated whenever
+        # the frame or any non-dragged label changes (see _build_drag_layer
+        # docstring + invalidation sites). See Issue M.
+        self._drag_layer: QPixmap | None = None
+        self._drag_layer_size: tuple[int, int] = (0, 0)
+        self._drag_layer_dragged_ids: frozenset = frozenset()
+
     def set_ass(self, ass: AssFile | None):
         self._ass = ass
         self._font_corrections.clear()
@@ -325,6 +336,11 @@ class VideoFrameWidget(QWidget):
         # Render cache holds QFont/QPainterPath built at the previous file's
         # font sizes / resolutions -- drop it for the same reason.
         self._render_cache.clear()
+        # Drag layer encodes the previous file's labels at their previous
+        # positions -- drop it (we should not be dragging across a set_ass
+        # call but be defensive).
+        self._drag_layer = None
+        self._drag_layer_dragged_ids = frozenset()
         # Selection is owned by the store; clearing on file change is the
         # store's job (LabelStore.load wipes selection). We just cancel any
         # in-progress edit.
@@ -358,6 +374,16 @@ class VideoFrameWidget(QWidget):
         for lid in ids:
             self._rect_cache.pop(lid, None)
             self._render_cache.pop(lid, None)
+        # Drag layer encodes non-dragged labels at their pre-mutation
+        # appearance. If any mutated id is OUTSIDE the dragged set the
+        # layer is stale. Per Issue 4 no mutations should fire mid-drag,
+        # but if a path slips through the layer must catch up. The next
+        # paintEvent will opportunistically rebuild it if a drag is still
+        # in progress.
+        if self._drag_layer is not None:
+            if ids - self._drag_layer_dragged_ids:
+                self._drag_layer = None
+                self._drag_layer_dragged_ids = frozenset()
         self._update_visible_labels(self._current_time)
         self.update()
 
@@ -367,6 +393,10 @@ class VideoFrameWidget(QWidget):
         indexed paint scratch dict), refresh visible list, and repaint."""
         self._rect_cache.clear()
         self._render_cache.clear()
+        # Drag layer encodes the previous set of visible labels; structural
+        # changes (add/remove) make it stale unconditionally.
+        self._drag_layer = None
+        self._drag_layer_dragged_ids = frozenset()
         self._update_visible_labels(self._current_time)
         self.update()
 
@@ -375,6 +405,11 @@ class VideoFrameWidget(QWidget):
         they referred to the previous AssFile's geometry and fonts."""
         self._rect_cache.clear()
         self._render_cache.clear()
+        # Defensive: also drop the drag layer (we should not be dragging
+        # across a file load, but a stale layer would render the previous
+        # file's frame on the next paint).
+        self._drag_layer = None
+        self._drag_layer_dragged_ids = frozenset()
 
     # --- Selection helpers (read-through to the store) ------------------
 
@@ -520,6 +555,12 @@ class VideoFrameWidget(QWidget):
         log.warning("async frame request seq=%d failed: %s", seq, message)
 
     def _update_scaled_pixmap(self):
+        # Frame pixmap is about to change. Any in-flight drag layer has the
+        # OLD frame baked in -- drop it so the next paint either rebuilds or
+        # falls through to the normal path.
+        if self._drag_layer is not None:
+            self._drag_layer = None
+            self._drag_layer_dragged_ids = frozenset()
         if not self._pixmap or self._pixmap.isNull():
             self._scaled_pixmap = None
             return
@@ -901,113 +942,224 @@ class VideoFrameWidget(QWidget):
             h_align=h_align,
         )
 
+    def _paint_labels(
+        self,
+        painter: QPainter,
+        *,
+        include_only: frozenset | None = None,
+        exclude_ids: frozenset = frozenset(),
+        draw_handles: bool = True,
+    ) -> None:
+        """Render visible labels using the cached render data.
+
+        Walks every visible label so :attr:`_label_rects` is populated for
+        the full visible set (hit-testing in the gesture handlers depends
+        on this even when only a subset is drawn live during a drag).
+
+        ``include_only`` (when not None) restricts the actual path/fill
+        drawing to labels whose ``label_id`` appears in the set. Rects are
+        still computed and recorded for every visible label.
+
+        ``exclude_ids`` is an additional filter: any label_id in this set
+        is skipped for drawing (used when building the drag layer to omit
+        the dragged labels -- they re-paint live on top of the layer).
+
+        ``draw_handles`` controls whether selection handles overlay the
+        drawn label (suppressed when building the drag layer because the
+        handles should follow the dragged label live).
+        """
+        if not self._visible_labels:
+            return
+        self._label_rects.clear()
+        selected_ids = self._selected_ids()
+
+        for label in self._visible_labels:
+            # Skip the label being edited inline
+            if self._editing_label and label.line_index == self._editing_label.line_index:
+                continue
+
+            font = self._font_for_label(label)
+            painter.setFont(font)
+            rect = self._compute_rect(label, font)
+            self._label_rects[label.line_index] = rect
+
+            # Filter: skip actual drawing for labels outside include_only or
+            # inside exclude_ids. The rect was still recorded above so hit-
+            # testing during a drag continues to work for every visible label.
+            lid = label.label_id
+            if include_only is not None and lid not in include_only:
+                continue
+            if lid in exclude_ids:
+                continue
+
+            rotation = label.rotation if label.rotation is not None else 0.0
+            anchor = self._anchor_from_rect(rect, label)
+
+            if rotation != 0:
+                painter.save()
+                painter.translate(anchor)
+                painter.rotate(-rotation)  # ASS is counterclockwise, Qt is clockwise
+                painter.translate(-anchor)
+
+            painter.fillRect(rect, QColor(0, 0, 0, 140))
+
+            is_selected = lid in selected_ids
+            if is_selected:
+                pen = QPen(QColor(74, 158, 255), 2.0, Qt.PenStyle.SolidLine)
+            else:
+                pen = QPen(QColor(255, 255, 255, 180), 1.5, Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(rect)
+
+            text_rect = rect.adjusted(6, 4, -6, -4)
+
+            # Resolve colours and outline for this label
+            style = self._ass.styles.get(label.style_name) if self._ass else None
+            text_colour = ass_colour_to_qcolor(
+                label.primary_colour if label.primary_colour is not None else
+                (style.primary_colour if style else "&H00FFFFFF&")
+            )
+            outline_colour = ass_colour_to_qcolor(
+                label.outline_colour if label.outline_colour is not None else
+                (style.outline_colour if style else "&H00000000&")
+            )
+            outline_width = (
+                label.outline_width if label.outline_width is not None else
+                (style.outline_width if style else 2.0)
+            )
+
+            # Segment-aware multi-line rendering -- uses the cached
+            # per-label render data so paintEvent does zero measurement
+            # and zero path-building per frame.
+            render = self._render_cache.get(lid) if lid else None
+            if render is None:
+                render = self._build_render_cache(label)
+                if lid:
+                    self._render_cache[lid] = render
+
+            h_align = render.h_align
+            for li, x_in_line, baseline_in_line, seg_font, path, _advance in render.seg_render:
+                line_w = render.line_widths[li]
+                max_line_h = render.line_max_heights[li]
+                if h_align == 1:
+                    line_x = text_rect.x()
+                elif h_align == 3:
+                    line_x = text_rect.right() - line_w
+                else:
+                    line_x = text_rect.x() + (text_rect.width() - line_w) / 2
+                line_y = text_rect.y() + li * max_line_h
+                abs_x = line_x + x_in_line
+                abs_y = line_y + baseline_in_line
+
+                # Path was built at (0, 0); translate to the absolute
+                # baseline + x position, draw, then translate back.
+                # painter.save/restore would also work but a paired
+                # translate avoids the state-stack push/pop overhead.
+                painter.translate(abs_x, abs_y)
+                if outline_width > 0:
+                    painter.setPen(QPen(outline_colour, outline_width * 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawPath(path)
+
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(text_colour)
+                painter.drawPath(path)
+                painter.translate(-abs_x, -abs_y)
+
+            if rotation != 0:
+                painter.restore()
+
+            # Draw resize/rotate handles for single selection
+            if draw_handles and is_selected and len(selected_ids) == 1:
+                self._draw_handles(painter, rect, anchor, rotation)
+
+    def _build_drag_layer(self, dragged_ids: frozenset) -> None:
+        """Render frame + non-dragged labels into a pixmap, ready for fast
+        paintEvent compositing during the gesture.
+
+        Called at the start of a drag/resize/rotate gesture. Subsequent
+        paintEvents during the gesture drawPixmap this layer then paint
+        only the dragged label(s) live on top, collapsing per-mousemove
+        paint cost from ~30 drawPath calls to ~3 plus one drawPixmap.
+
+        Memory: one widget-sized RGBA QPixmap (~3.5 MB for 1280x720, up to
+        ~12 MB for 1920x1080) released by ``_drag_layer = None`` on gesture
+        finish (see _finish_drag / _finish_resize / _finish_rotate).
+        """
+        if not self._scaled_pixmap or self._scaled_pixmap.isNull():
+            self._drag_layer = None
+            self._drag_layer_dragged_ids = frozenset()
+            return
+        size = (self.width(), self.height())
+        layer = QPixmap(*size)
+        layer.fill(Qt.GlobalColor.transparent)
+        p = QPainter(layer)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # Frame
+        p.drawPixmap(self._frame_x, self._frame_y, self._scaled_pixmap)
+        # All visible labels EXCEPT the ones being dragged (those re-paint
+        # live in paintEvent on top of the layer). Handles are suppressed
+        # in the layer so only the live-drawn dragged label gets the overlay.
+        self._paint_labels(p, exclude_ids=dragged_ids, draw_handles=False)
+        p.end()
+        self._drag_layer = layer
+        self._drag_layer_size = size
+        self._drag_layer_dragged_ids = dragged_ids
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # Draw frame
-        if self._scaled_pixmap and not self._scaled_pixmap.isNull():
-            painter.drawPixmap(self._frame_x, self._frame_y, self._scaled_pixmap)
-
-        # Draw labels
-        if self._visible_labels:
-            self._label_rects.clear()
-            selected_ids = self._selected_ids()
-
-            for label in self._visible_labels:
-                # Skip the label being edited inline
-                if self._editing_label and label.line_index == self._editing_label.line_index:
-                    continue
-
-                font = self._font_for_label(label)
-                painter.setFont(font)
-                rect = self._compute_rect(label, font)
-                self._label_rects[label.line_index] = rect
-
-                rotation = label.rotation if label.rotation is not None else 0.0
-                anchor = self._anchor_from_rect(rect, label)
-
-                if rotation != 0:
-                    painter.save()
-                    painter.translate(anchor)
-                    painter.rotate(-rotation)  # ASS is counterclockwise, Qt is clockwise
-                    painter.translate(-anchor)
-
-                painter.fillRect(rect, QColor(0, 0, 0, 140))
-
-                is_selected = label.label_id in selected_ids
-                if is_selected:
-                    pen = QPen(QColor(74, 158, 255), 2.0, Qt.PenStyle.SolidLine)
+        use_layer = (
+            self._drag_layer is not None
+            and self._drag_layer_size == (self.width(), self.height())
+        )
+        if use_layer:
+            # Fast path during a drag: pre-composited frame + non-dragged
+            # labels in a single drawPixmap. The label rect cache is still
+            # populated for every visible label by _paint_labels below
+            # (cheap thanks to _rect_cache hits) so the gesture handlers'
+            # hit-tests continue to work.
+            painter.drawPixmap(0, 0, self._drag_layer)
+            self._paint_labels(
+                painter,
+                include_only=self._drag_layer_dragged_ids,
+                draw_handles=True,
+            )
+        else:
+            # Layer is stale (size mismatch) or never built. Drop it so the
+            # next gesture frame rebuilds rather than re-using the wrong
+            # pixmap.
+            if self._drag_layer is not None:
+                self._drag_layer = None
+                self._drag_layer_dragged_ids = frozenset()
+            # Frame
+            if self._scaled_pixmap and not self._scaled_pixmap.isNull():
+                painter.drawPixmap(self._frame_x, self._frame_y, self._scaled_pixmap)
+            # All visible labels
+            if self._visible_labels:
+                self._paint_labels(painter, draw_handles=True)
+            # Opportunistic mid-gesture rebuild: if a drag is active but the
+            # layer was just invalidated, rebuild it now so the NEXT paint
+            # hits the fast path. The current paint still pays the full
+            # cost; this just amortises the loss to one frame.
+            if (
+                self._drag_mode != _DragMode.NONE
+                and self._scaled_pixmap is not None
+                and not self._scaled_pixmap.isNull()
+            ):
+                if self._drag_mode == _DragMode.MOVE:
+                    dragged = frozenset(self._selected_ids())
+                elif self._handle_label is not None and self._handle_label.label_id:
+                    dragged = frozenset({self._handle_label.label_id})
                 else:
-                    pen = QPen(QColor(255, 255, 255, 180), 1.5, Qt.PenStyle.DashLine)
-                painter.setPen(pen)
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawRect(rect)
+                    dragged = frozenset()
+                if dragged:
+                    self._build_drag_layer(dragged)
 
-                text_rect = rect.adjusted(6, 4, -6, -4)
-
-                # Resolve colours and outline for this label
-                style = self._ass.styles.get(label.style_name) if self._ass else None
-                text_colour = ass_colour_to_qcolor(
-                    label.primary_colour if label.primary_colour is not None else
-                    (style.primary_colour if style else "&H00FFFFFF&")
-                )
-                outline_colour = ass_colour_to_qcolor(
-                    label.outline_colour if label.outline_colour is not None else
-                    (style.outline_colour if style else "&H00000000&")
-                )
-                outline_width = (
-                    label.outline_width if label.outline_width is not None else
-                    (style.outline_width if style else 2.0)
-                )
-
-                # Segment-aware multi-line rendering — uses the cached
-                # per-label render data so paintEvent does zero measurement
-                # and zero path-building per frame.
-                lid = label.label_id
-                render = self._render_cache.get(lid) if lid else None
-                if render is None:
-                    render = self._build_render_cache(label)
-                    if lid:
-                        self._render_cache[lid] = render
-
-                h_align = render.h_align
-                for li, x_in_line, baseline_in_line, seg_font, path, _advance in render.seg_render:
-                    line_w = render.line_widths[li]
-                    max_line_h = render.line_max_heights[li]
-                    if h_align == 1:
-                        line_x = text_rect.x()
-                    elif h_align == 3:
-                        line_x = text_rect.right() - line_w
-                    else:
-                        line_x = text_rect.x() + (text_rect.width() - line_w) / 2
-                    line_y = text_rect.y() + li * max_line_h
-                    abs_x = line_x + x_in_line
-                    abs_y = line_y + baseline_in_line
-
-                    # Path was built at (0, 0); translate to the absolute
-                    # baseline + x position, draw, then translate back.
-                    # painter.save/restore would also work but a paired
-                    # translate avoids the state-stack push/pop overhead.
-                    painter.translate(abs_x, abs_y)
-                    if outline_width > 0:
-                        painter.setPen(QPen(outline_colour, outline_width * 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-                        painter.setBrush(Qt.BrushStyle.NoBrush)
-                        painter.drawPath(path)
-
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.setBrush(text_colour)
-                    painter.drawPath(path)
-                    painter.translate(-abs_x, -abs_y)
-
-                if rotation != 0:
-                    painter.restore()
-
-                # Draw resize/rotate handles for single selection
-                if is_selected and len(selected_ids) == 1:
-                    self._draw_handles(painter, rect, anchor, rotation)
-
-        # Draw hovered label timestamp
+        # Draw hovered label timestamp (overlays both modes; needs
+        # _label_rects which _paint_labels populated above).
         if self._hovered_label is not None:
             hr = self._label_rects.get(self._hovered_label.line_index)
             if hr is not None:
@@ -1048,6 +1200,11 @@ class VideoFrameWidget(QWidget):
         # QPainterPath objects measured at those font sizes -- a resize
         # changes the scale factor, so every cached entry is invalid.
         self._render_cache.clear()
+        # Drag layer is widget-sized and bakes the old scaled_pixmap; the
+        # paint-time size mismatch check would catch this too but explicit
+        # invalidation is cleaner.
+        self._drag_layer = None
+        self._drag_layer_dragged_ids = frozenset()
         # Recompute the editor extraction target. Rounded to the nearest
         # 256 so continuous resize gestures don't fragment the (max_dim-keyed)
         # cache. When the target shifts by a meaningful amount, drop the
@@ -1125,6 +1282,11 @@ class VideoFrameWidget(QWidget):
                         self._rotate_initial_frz = label.rotation if label.rotation is not None else 0.0
                 if mode == _DragMode.ROTATE:
                     self.drag_started.emit()
+                # Pre-composite the drag layer: resize/rotate only ever
+                # touches the single handle's label, so everything else
+                # goes into the static layer.
+                if label.label_id:
+                    self._build_drag_layer(frozenset({label.label_id}))
                 event.accept()
                 return
 
@@ -1285,6 +1447,12 @@ class VideoFrameWidget(QWidget):
         assert self._press_pos is not None
         self._drag_offset = anchor - self._press_pos
         self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+        # Pre-composite the drag layer: frame + every non-selected visible
+        # label baked into one pixmap. During the drag we drawPixmap that
+        # layer + only the selected (dragged) labels live on top.
+        dragged_ids = frozenset(lid for lid in self._selected_ids() if lid)
+        if dragged_ids:
+            self._build_drag_layer(dragged_ids)
         self.drag_started.emit()
 
     def _do_drag_move(self, current_pos: QPointF):
@@ -1422,6 +1590,10 @@ class VideoFrameWidget(QWidget):
         self._dragging = None
         self._snap_lines.clear()
         self._multi_drag_initial.clear()
+        # Tear down the drag layer: gesture is over, the next paint should
+        # render every label fresh from the store-committed state.
+        self._drag_layer = None
+        self._drag_layer_dragged_ids = frozenset()
         self.update()
         self.drag_finished.emit()
 
@@ -1465,6 +1637,9 @@ class VideoFrameWidget(QWidget):
             # resize gesture.
             self.label_resized.emit(label, label.font_size)
         self._handle_label = None
+        # Tear down the drag layer: gesture is over.
+        self._drag_layer = None
+        self._drag_layer_dragged_ids = frozenset()
         self.update()
 
     def _do_rotate_move(self, pos: QPointF):
@@ -1497,6 +1672,9 @@ class VideoFrameWidget(QWidget):
             # Commit via signal -> RotateLabel mutation in controller.
             self.label_rotated.emit(label, rotation)
         self._handle_label = None
+        # Tear down the drag layer: gesture is over.
+        self._drag_layer = None
+        self._drag_layer_dragged_ids = frozenset()
         self.update()
         self.drag_finished.emit()
 
@@ -1635,6 +1813,7 @@ class VideoFrameWidget(QWidget):
             return
         self._prefetch_worker = FramePrefetchWorker(
             self._video_service, self._video_path, times,
+            max_dim=self._target_max_dim,
         )
         # Parent thread to self so Qt (not Python GC) controls its lifetime;
         # deleteLater on finished frees both asynchronously once ffmpeg
