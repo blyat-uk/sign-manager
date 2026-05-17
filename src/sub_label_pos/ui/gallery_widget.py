@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
 import struct
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from PyQt6.QtCore import Qt, QRectF, pyqtSignal, QObject, QThread
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QColor, QFont, QFontMetricsF, QPen, QRawFont
@@ -14,8 +16,15 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
 )
 
-from ass_parser import AssFile, AssStyle, LabelDialogue, parse_rich_text
-from video_widget import extract_frame, extract_frame_as_image
+from sub_label_pos.geometry.rich_text import parse_rich_text
+from sub_label_pos.model.ass_file import AssFile, AssStyle, LabelDialogue
+from sub_label_pos.model.groups import DerivedGroupModel
+from sub_label_pos.model.groups import LabelGroup as ModelLabelGroup
+from sub_label_pos.model.label_store import LabelStore
+from sub_label_pos.services.exceptions import VideoServiceError
+from sub_label_pos.services.video_service import VideoService
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -221,6 +230,7 @@ class ThumbnailWorker(QObject):
 
     def __init__(
         self,
+        video_service: VideoService,
         video_path: str,
         groups: list[LabelGroup],
         play_res_x: int,
@@ -235,6 +245,7 @@ class ThumbnailWorker(QObject):
         font_corrections: dict[tuple[str, bool, bool], float] | None = None,
     ):
         super().__init__()
+        self._svc = video_service
         self._video_path = video_path
         self._groups = groups
         self._play_res_x = play_res_x
@@ -253,10 +264,16 @@ class ThumbnailWorker(QObject):
         self._cancelled = True
 
     def run(self):
+        p = Path(self._video_path)
         for i, group in enumerate(self._groups):
             if self._cancelled:
                 break
-            img = extract_frame_as_image(self._video_path, group.representative_time)
+            try:
+                img = self._svc.get_frame(p, group.representative_time)
+            except VideoServiceError as e:
+                log.warning("thumbnail get_frame failed for %s @ %s: %s",
+                            self._video_path, group.representative_time, e)
+                continue
             if img and not img.isNull():
                 cropped = _crop_to_labels_image(
                     img, group,
@@ -279,6 +296,7 @@ class SingleThumbnailWorker(QObject):
 
     def __init__(
         self,
+        video_service: VideoService,
         video_path: str,
         index: int,
         representative_time: float,
@@ -295,6 +313,7 @@ class SingleThumbnailWorker(QObject):
         font_corrections: dict[tuple[str, bool, bool], float] | None = None,
     ):
         super().__init__()
+        self._svc = video_service
         self._video_path = video_path
         self._index = index
         self._representative_time = representative_time
@@ -318,7 +337,13 @@ class SingleThumbnailWorker(QObject):
         if self._cancelled:
             self.finished.emit()
             return
-        img = extract_frame_as_image(self._video_path, self._representative_time)
+        try:
+            img = self._svc.get_frame(Path(self._video_path), self._representative_time)
+        except VideoServiceError as e:
+            log.warning("single-thumb get_frame failed for %s @ %s: %s",
+                        self._video_path, self._representative_time, e)
+            self.finished.emit()
+            return
         if img and not img.isNull() and not self._cancelled:
             cropped = _crop_to_labels_image(
                 img, self._group,
@@ -420,13 +445,26 @@ class GalleryPanel(QWidget):
     group_selected = pyqtSignal(int)
     group_right_clicked = pyqtSignal(int)  # index
 
-    def __init__(self, parent=None):
+    def __init__(
+        self,
+        store: LabelStore,
+        groups: DerivedGroupModel,
+        video_service: VideoService,
+        parent=None,
+    ):
         super().__init__(parent)
         self.setFixedHeight(_GALLERY_H)
         self.setStyleSheet("background: #252525;")
 
+        self._store = store
+        self._groups_model = groups
+        self._video_service = video_service
         self._thumbnails: list[GalleryThumbnail] = []
+        # Legacy LabelGroup adapter list (built from model groups). One per
+        # current thumbnail; mirrors model_groups index-for-index.
         self._groups: list[LabelGroup] = []
+        # Optional cache of preloaded QImage thumbnails to skip worker rebuilds.
+        self._preloaded_thumbnails: dict[str, QImage] = {}  # keyed by group_id
         self._video_path: str | None = None
         self._ass: AssFile | None = None
         self._font_correction: float = 1.0
@@ -464,6 +502,11 @@ class GalleryPanel(QWidget):
         self._hlayout.addStretch()
         self._scroll.setWidget(self._container)
 
+        # Subscribe to store + groups model signals
+        self._store.file_loaded.connect(self._on_file_loaded)
+        self._groups_model.groups_changed.connect(self._on_groups_changed)
+        self._store.labels_mutated.connect(self._on_labels_mutated)
+
     def _compute_font_correction(self):
         """Compute the libass-compatible font size correction for the Label style."""
         if not self._ass:
@@ -480,45 +523,142 @@ class GalleryPanel(QWidget):
             for st in self._ass.styles.values():
                 _get_font_correction_for(st.font_name, st.bold, st.italic, self._font_corrections)
 
-    def set_data(self, video_path: str, ass: AssFile):
-        self.clear()
-        self._video_path = video_path
+    def attach_ass(self, ass: AssFile | None) -> None:
+        """Inform the gallery of the active AssFile (for thumbnail rendering).
+
+        Required because ``LabelStore.state`` keeps ``styles`` but the gallery
+        also needs ``play_res_x/y`` and label-style defaults that live on
+        :class:`AssFile`. Until ``AssFile`` is fully retired (post L1), the
+        gallery still reads these fields directly.
+        """
         self._ass = ass
         self._compute_font_correction()
-        self._groups = compute_label_groups(ass.labels)
 
-        for i, group in enumerate(self._groups):
-            texts = [lb.text for lb in group.labels]
-            earliest = min(lb.start_time for lb in group.labels)
+    def attach_video(self, video_path: str | None) -> None:
+        """Tell the gallery which video file thumbnails should render from.
+
+        The store's ``source_path`` is the .ass path; the video path is a
+        separate concern owned by MainWindow until K2 extracts FileLoader.
+        """
+        self._video_path = video_path
+
+    def cache_preloaded_thumbnails(
+        self, ass: AssFile, model_groups: list[ModelLabelGroup], thumbnails: dict[int, QImage]
+    ) -> None:
+        """Pre-seed the per-group thumbnail cache (used by folder-preload).
+
+        Keys are :class:`ModelLabelGroup` ``group_id``s; the gallery applies
+        them when ``groups_changed`` fires after ``LabelStore.load``.
+        """
+        self.attach_ass(ass)
+        # Map preloaded index-based thumbnails to group_id-based cache.
+        for i, mg in enumerate(model_groups):
+            if i in thumbnails:
+                self._preloaded_thumbnails[mg.group_id] = thumbnails[i]
+
+    # --- Signal handlers ------------------------------------------------
+
+    def _on_file_loaded(self, _path) -> None:
+        """Clear pending workers and per-file cache. ``groups_changed`` will
+        immediately follow (DerivedGroupModel also subscribes to file_loaded)
+        and trigger the actual rebuild.
+
+        Note: ``_path`` here is the store's source_path (the .ass file). The
+        video path is set separately via :meth:`attach_video`.
+        """
+        self._cancel_loading()
+        self._cancel_single_refresh()
+        self._selected_index = -1
+        # Clear preloaded thumbnail cache from the previous file.
+        self._preloaded_thumbnails.clear()
+
+    def _on_groups_changed(self, _changed_ids) -> None:
+        """Full rebuild of the thumbnail list from the current model groups."""
+        # Tear down existing thumbnails (without nuking preloaded cache).
+        self._cancel_loading()
+        self._cancel_single_refresh()
+        prev_selected = self._selected_index
+        self._selected_index = -1
+        for thumb in self._thumbnails:
+            self._hlayout.removeWidget(thumb)
+            thumb.deleteLater()
+        self._thumbnails.clear()
+
+        # Build legacy LabelGroup adapters from current model groups.
+        self._groups = [self._to_legacy_group(mg) for mg in self._groups_model.groups]
+
+        # Capture video_path lazily from store if not set via file_loaded yet.
+        if self._video_path is None and self._store.source_path is not None:
+            # source_path on the store is the .ass path; video_path is set by
+            # MainWindow via _on_file_loaded which fires with the source path.
+            # Fall back: store source_path lets us populate when no video.
+            pass  # _video_path stays None until file_loaded fires explicitly
+
+        applied_indices: set[int] = set()
+        for i, lg in enumerate(self._groups):
+            texts = [lb.text for lb in lg.labels]
+            earliest = min((lb.start_time for lb in lg.labels), default=0.0)
             thumb = GalleryThumbnail(i, texts, _format_time(earliest))
             thumb.clicked.connect(self._on_thumb_clicked)
             thumb.right_clicked.connect(self._on_thumb_right_clicked)
             self._thumbnails.append(thumb)
             self._hlayout.insertWidget(self._hlayout.count() - 1, thumb)
 
-        if self._groups:
+            # Apply preloaded cached thumbnail if available.
+            mg = self._groups_model.groups[i]
+            cached = self._preloaded_thumbnails.get(mg.group_id)
+            if cached is not None and not cached.isNull():
+                thumb.set_pixmap(QPixmap.fromImage(cached))
+                applied_indices.add(i)
+
+        # Spawn worker for thumbnails not covered by preload cache.
+        if self._groups and self._video_path and self._ass:
+            self._start_thumbnail_loading(skip_indices=applied_indices)
+
+        # Restore selection visual if index still in range.
+        if 0 <= prev_selected < len(self._thumbnails):
+            self.select_group(prev_selected)
+
+    def _on_labels_mutated(self, affected_ids) -> None:
+        """Refresh thumbnails for any group containing an affected label_id.
+
+        For a single affected group we fire the lightweight single-thumbnail
+        worker; for multiple groups we kick off a fresh full bulk worker
+        (which is preferable to chaining single workers and cancelling each
+        other).
+        """
+        if not affected_ids or not self._video_path or not self._ass:
+            return
+        affected = set(affected_ids)
+        impacted: list[int] = []
+        for i, mg in enumerate(self._groups_model.groups):
+            if any(lid in affected for lid in mg.label_ids):
+                # Refresh legacy group adapter so cropping reflects current state.
+                if i < len(self._groups):
+                    self._groups[i] = self._to_legacy_group(mg)
+                # Also update the visible text on the thumbnail synchronously.
+                if i < len(self._thumbnails):
+                    self._thumbnails[i].update_texts(
+                        [lb.text for lb in self._groups[i].labels]
+                    )
+                impacted.append(i)
+        if not impacted:
+            return
+        if len(impacted) == 1:
+            self._refresh_single_thumbnail(impacted[0])
+        else:
+            # Multiple groups affected: full bulk re-render. Cancels any
+            # running bulk worker.
             self._start_thumbnail_loading()
 
-    def set_data_preloaded(self, video_path: str, ass: AssFile,
-                           groups: list[LabelGroup], thumbnails: dict[int, QImage]):
-        """Apply pre-computed groups and thumbnails without starting a ThumbnailWorker."""
-        self.clear()
-        self._video_path = video_path
-        self._ass = ass
-        self._compute_font_correction()
-        self._groups = groups
+    # --- Internal helpers ----------------------------------------------
 
-        for i, group in enumerate(groups):
-            texts = [lb.text for lb in group.labels]
-            earliest = min(lb.start_time for lb in group.labels)
-            thumb = GalleryThumbnail(i, texts, _format_time(earliest))
-            thumb.clicked.connect(self._on_thumb_clicked)
-            thumb.right_clicked.connect(self._on_thumb_right_clicked)
-            self._thumbnails.append(thumb)
-            self._hlayout.insertWidget(self._hlayout.count() - 1, thumb)
-            if i in thumbnails:
-                pm = QPixmap.fromImage(thumbnails[i])
-                thumb.set_pixmap(pm)
+    def _to_legacy_group(self, mg: ModelLabelGroup) -> LabelGroup:
+        """Build a legacy LabelGroup (with full LabelDialogue list) from a model
+        group, looking labels up in store state."""
+        state = self._store.state
+        labels = [state.labels[lid] for lid in mg.label_ids if lid in state.labels]
+        return LabelGroup(labels=labels, representative_time=mg.representative_time)
 
     def _on_thumb_clicked(self, index: int):
         self.select_group(index)
@@ -527,10 +667,17 @@ class GalleryPanel(QWidget):
     def _on_thumb_right_clicked(self, index: int):
         self.group_right_clicked.emit(index)
 
-    def _start_thumbnail_loading(self):
+    def _start_thumbnail_loading(self, skip_indices: set[int] | None = None):
         if not self._ass or not self._video_path:
             return
+        # Filter out groups that already have a cached/applied thumbnail. We
+        # still pass the full groups list (so indices match) — the worker just
+        # skips entries we mark, but ThumbnailWorker doesn't have a skip hook,
+        # so we simply re-render all (cached ones get overwritten with the
+        # freshly-rendered identical image). Cheap and avoids special-casing.
+        del skip_indices  # reserved for future incremental optimisation
         self._thumb_worker = ThumbnailWorker(
+            self._video_service,
             self._video_path,
             self._groups,
             self._ass.play_res_x,
@@ -565,7 +712,7 @@ class GalleryPanel(QWidget):
         self._thumb_worker = None
         self._thumb_thread = None
 
-    def refresh_thumbnail(self, index: int) -> None:
+    def _refresh_single_thumbnail(self, index: int) -> None:
         """Re-extract frame and re-crop for a single group asynchronously."""
         if not (0 <= index < len(self._groups)) or not self._video_path or not self._ass:
             return
@@ -575,6 +722,7 @@ class GalleryPanel(QWidget):
         # Cancel any previous single-thumbnail refresh
         self._cancel_single_refresh()
         self._single_worker = SingleThumbnailWorker(
+            self._video_service,
             self._video_path,
             index,
             group.representative_time,
@@ -611,23 +759,6 @@ class GalleryPanel(QWidget):
         self._single_worker = None
         self._single_thread = None
 
-    def remove_group(self, index: int) -> None:
-        """Remove a group and its thumbnail widget. Adjusts indices."""
-        if not (0 <= index < len(self._groups)):
-            return
-        self._groups.pop(index)
-        thumb = self._thumbnails.pop(index)
-        self._hlayout.removeWidget(thumb)
-        thumb.deleteLater()
-        # Re-index remaining thumbnails so clicked signals emit correct index
-        for i, t in enumerate(self._thumbnails):
-            t._index = i
-        # Fix selection
-        if self._selected_index == index:
-            self._selected_index = -1
-        elif self._selected_index > index:
-            self._selected_index -= 1
-
     def select_group(self, index: int):
         if self._selected_index >= 0 and self._selected_index < len(self._thumbnails):
             self._thumbnails[self._selected_index].set_selected(False)
@@ -636,16 +767,6 @@ class GalleryPanel(QWidget):
             thumb = self._thumbnails[index]
             thumb.set_selected(True)
             self._scroll.ensureWidgetVisible(thumb, 50, 0)
-
-    def clear(self):
-        self._cancel_loading()
-        self._cancel_single_refresh()
-        self._selected_index = -1
-        self._groups = []
-        for thumb in self._thumbnails:
-            self._hlayout.removeWidget(thumb)
-            thumb.deleteLater()
-        self._thumbnails.clear()
 
     @property
     def groups(self) -> list[LabelGroup]:

@@ -1,48 +1,43 @@
 from __future__ import annotations
 
-import json
+import logging
 import math
-import struct
-import subprocess
 from collections import OrderedDict
 from enum import Enum
+from pathlib import Path
 
 from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal, QObject, QThread
 from PyQt6.QtGui import (
     QPainter, QFont, QColor, QPen, QFontMetricsF, QCursor, QPixmap, QImage,
-    QRawFont, QPainterPath,
+    QPainterPath,
 )
 from PyQt6.QtWidgets import QWidget, QTextEdit
 
-from ass_parser import (
-    AssFile, LabelDialogue, _seconds_to_time,
+from sub_label_pos.geometry.coords import (
+    ass_to_widget as _coords_ass_to_widget,
+    scale_factor as _coords_scale_factor,
+    widget_to_ass as _coords_widget_to_ass,
+)
+from sub_label_pos.geometry.label_geometry import (
+    compute_label_rect as _compute_label_rect,
+    libass_font_correction as _libass_font_correction,
+)
+from sub_label_pos.geometry.rich_text import (
     parse_rich_text, segments_to_html, html_to_segments, segments_to_ass,
 )
-from label_toolbar import ass_colour_to_qcolor
+from sub_label_pos.model.ass_file import (
+    AssFile, LabelDialogue, _seconds_to_time,
+)
+from sub_label_pos.model.label_store import LabelStore
+from sub_label_pos.model.types import LabelId
+from sub_label_pos.services.exceptions import VideoServiceError
+from sub_label_pos.services.video_service import VideoService
+from sub_label_pos.ui.label_toolbar import ass_colour_to_qcolor
 
+log = logging.getLogger(__name__)
 
-def _libass_font_correction(font: QFont) -> float:
-    """Correction factor so Qt's setPixelSize matches libass rendering.
-
-    libass overrides FreeType face metrics with OS/2 usWinAscent/usWinDescent
-    and uses FT_SIZE_REQUEST_TYPE_REAL_DIM, mapping font size to the Win cell
-    height.  Qt's setPixelSize maps to the em-square.  This returns
-    unitsPerEm / (usWinAscent + usWinDescent).
-    """
-    raw = QRawFont.fromFont(font)
-    os2 = raw.fontTable(b"OS/2")
-    if len(os2) < 78:
-        return 1.0
-    upm = raw.unitsPerEm()
-    win_asc = struct.unpack_from(">H", os2, 74)[0]
-    win_desc = struct.unpack_from(">H", os2, 76)[0]
-    cell = win_asc + win_desc
-    return upm / cell if cell > 0 else 1.0
 
 _CACHE_MAX = 50
-_MAX_FRAME_W = 1920
-_MAX_FRAME_H = 1080
-_JPEG_QUALITY = 5  # ffmpeg MJPEG scale (2=best, 31=worst), ~90% JPEG quality
 _DRAG_THRESHOLD = 4  # pixels before press becomes drag
 _HANDLE_SIZE = 8        # px, side length of corner resize squares
 _HANDLE_HIT_RADIUS = 10  # px, hit test tolerance for handles
@@ -65,123 +60,37 @@ def _rotate_point(p: QPointF, center: QPointF, angle_deg: float) -> QPointF:
     return QPointF(center.x() + rx, center.y() + ry)
 
 
-def detect_fps(video_path: str) -> float:
-    """Return video FPS via ffprobe, defaulting to 24.0 on failure."""
-    cmd = [
-        "ffprobe", "-v", "quiet",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=r_frame_rate",
-        "-of", "csv=p=0",
-        video_path,
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        if result.returncode == 0 and result.stdout.strip():
-            num, den = result.stdout.strip().split("/")
-            return float(num) / float(den)
-    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError, ZeroDivisionError):
-        pass
-    return 24.0
-
-
-def extract_frame(video_path: str, seconds: float) -> QPixmap | None:
-    """Extract a single video frame at the given time via ffmpeg."""
-    cmd = [
-        "ffmpeg",
-        "-loglevel", "quiet",
-        "-ss", f"{seconds:.3f}",
-        "-i", video_path,
-        "-frames:v", "1",
-        "-vf", f"scale='min({_MAX_FRAME_W},iw)':'min({_MAX_FRAME_H},ih)':force_original_aspect_ratio=decrease",
-        "-f", "image2pipe",
-        "-vcodec", "mjpeg",
-        "-q:v", str(_JPEG_QUALITY),
-        "pipe:1",
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, timeout=10)
-        if result.returncode == 0 and result.stdout:
-            pm = QPixmap()
-            pm.loadFromData(result.stdout)
-            return pm
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-    return None
-
-
-def extract_frame_as_image(video_path: str, seconds: float) -> QImage | None:
-    """Thread-safe variant: returns QImage instead of QPixmap."""
-    cmd = [
-        "ffmpeg",
-        "-loglevel", "quiet",
-        "-ss", f"{seconds:.3f}",
-        "-i", video_path,
-        "-frames:v", "1",
-        "-vf", f"scale='min({_MAX_FRAME_W},iw)':'min({_MAX_FRAME_H},ih)':force_original_aspect_ratio=decrease",
-        "-f", "image2pipe",
-        "-vcodec", "mjpeg",
-        "-q:v", str(_JPEG_QUALITY),
-        "pipe:1",
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, timeout=10)
-        if result.returncode == 0 and result.stdout:
-            img = QImage()
-            img.loadFromData(result.stdout)
-            return img
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-    return None
-
-
-def _get_video_dimensions(path: str) -> tuple[int, int] | None:
-    cmd = [
-        "ffprobe", "-v", "quiet", "-print_format", "json",
-        "-show_entries", "stream=width,height",
-        "-select_streams", "v:0", path,
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        if result.returncode == 0:
-            info = json.loads(result.stdout)
-            s = info["streams"][0]
-            return int(s["width"]), int(s["height"])
-    except (subprocess.TimeoutExpired, FileNotFoundError, KeyError, ValueError,
-            json.JSONDecodeError, IndexError):
-        pass
-    return None
-
-
-def detect_duration(video_path: str) -> float:
-    """Return video duration in seconds via ffprobe, defaulting to 0.0 on failure."""
-    cmd = [
-        "ffprobe", "-v", "quiet",
-        "-show_entries", "format=duration",
-        "-of", "csv=p=0",
-        video_path,
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        if result.returncode == 0 and result.stdout.strip():
-            return float(result.stdout.strip())
-    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
-        pass
-    return 0.0
-
-
 class VideoSetupWorker(QObject):
-    """Runs detect_fps, _get_video_dimensions, detect_duration, and extract_frame_as_image off the main thread."""
+    """Fetches fps/dims/duration/initial-frame via a VideoService off the main thread."""
     finished = pyqtSignal(float, object, object, float)  # fps, dims, QImage, duration
 
-    def __init__(self, path: str):
+    def __init__(self, video_service: VideoService, path: str):
         super().__init__()
+        self._svc = video_service
         self._path = path
 
     def run(self):
-        fps = detect_fps(self._path)
-        dims = _get_video_dimensions(self._path)
-        duration = detect_duration(self._path)
-        frame = extract_frame_as_image(self._path, 0)
+        p = Path(self._path)
+        try:
+            fps = self._svc.get_fps(p)
+        except VideoServiceError as e:
+            log.warning("get_fps failed for %s: %s", self._path, e)
+            fps = 24.0
+        try:
+            dims = self._svc.get_dimensions(p)
+        except VideoServiceError as e:
+            log.warning("get_dimensions failed for %s: %s", self._path, e)
+            dims = None
+        try:
+            duration = self._svc.get_duration(p)
+        except VideoServiceError as e:
+            log.warning("get_duration failed for %s: %s", self._path, e)
+            duration = 0.0
+        try:
+            frame = self._svc.get_frame(p, 0)
+        except VideoServiceError as e:
+            log.warning("get_frame(0) failed for %s: %s", self._path, e)
+            frame = None
         self.finished.emit(fps, dims, frame, duration)
 
 
@@ -190,8 +99,9 @@ class FramePrefetchWorker(QObject):
     frame_ready = pyqtSignal(int, QPixmap)  # cs_key, pixmap
     finished = pyqtSignal()
 
-    def __init__(self, video_path: str, times: list[float]):
+    def __init__(self, video_service: VideoService, video_path: str, times: list[float]):
         super().__init__()
+        self._svc = video_service
         self._video_path = video_path
         self._times = times
         self._cancelled = False
@@ -200,10 +110,16 @@ class FramePrefetchWorker(QObject):
         self._cancelled = True
 
     def run(self):
+        p = Path(self._video_path)
         for t in self._times:
             if self._cancelled:
                 break
-            img = extract_frame_as_image(self._video_path, t)
+            try:
+                img = self._svc.get_frame(p, t)
+            except VideoServiceError as e:
+                log.warning("prefetch get_frame failed for %s @ %s: %s",
+                            self._video_path, t, e)
+                continue
             if img and not img.isNull() and not self._cancelled:
                 pm = QPixmap.fromImage(img)
                 cs_key = int(round(t * 100))
@@ -215,7 +131,6 @@ class VideoFrameWidget(QWidget):
     """Displays video frames extracted via ffmpeg and renders draggable ASS labels."""
 
     label_moved = pyqtSignal(LabelDialogue, int, int)  # label, new_x, new_y
-    label_selected = pyqtSignal(LabelDialogue)
     label_resized = pyqtSignal(object, int)    # label, new_font_size
     label_rotated = pyqtSignal(object, float)  # label, new_rotation_degrees
     edit_requested = pyqtSignal(LabelDialogue)
@@ -223,16 +138,17 @@ class VideoFrameWidget(QWidget):
     editing_cancelled = pyqtSignal()
     context_menu_requested = pyqtSignal(QPointF)
     empty_context_menu_requested = pyqtSignal(QPointF)
-    selection_cleared = pyqtSignal()
     drag_started = pyqtSignal()   # emitted when move or rotate drag begins
     drag_finished = pyqtSignal()  # emitted when move or rotate drag ends
 
-    def __init__(self, parent=None):
+    def __init__(self, store: LabelStore, video_service: VideoService, parent=None):
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setStyleSheet("background: #1e1e1e;")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
+        self._store = store
+        self._video_service = video_service
         self._video_path: str | None = None
         self._ass: AssFile | None = None
         self._font_corrections: dict[tuple[str, bool, bool], float] = {}
@@ -254,8 +170,16 @@ class VideoFrameWidget(QWidget):
         self._current_time = 0.0
         self._fps: float = 24.0
 
-        # Selection state
-        self._selected: set[int] = set()  # selected line_index values
+        # Selection state is owned by the store. Subscribe to changes so the
+        # widget repaints when selection updates from any source (toolbar,
+        # gallery, programmatic clear-on-load, etc.).
+        self._store.selection_changed.connect(self._on_store_selection_changed)
+        # Refresh visible_labels (which reads from store.state) whenever the
+        # store reports structural changes -- the LabelDialogue instances in
+        # state get swapped in by mutations, so we re-collect them and repaint.
+        self._store.labels_mutated.connect(self._on_store_labels_changed)
+        self._store.labels_added.connect(self._on_store_labels_changed)
+        self._store.labels_removed.connect(self._on_store_labels_changed)
 
         # Click/drag distinction
         self._press_pos: QPointF | None = None
@@ -295,9 +219,33 @@ class VideoFrameWidget(QWidget):
     def set_ass(self, ass: AssFile | None):
         self._ass = ass
         self._font_corrections.clear()
-        self._selected.clear()
+        # Selection is owned by the store; clearing on file change is the
+        # store's job (LabelStore.load wipes selection). We just cancel any
+        # in-progress edit.
         self._cancel_editing()
         self.update()
+
+    # --- Store signal slots ---------------------------------------------
+
+    def _on_store_selection_changed(self, _selected_ids: set) -> None:
+        """Selection changed in the store — repaint to reflect new state."""
+        self.update()
+
+    def _on_store_labels_changed(self, _ids: set) -> None:
+        """Store reported labels added/removed/mutated -- refresh visible list."""
+        self._update_visible_labels(self._current_time)
+        self.update()
+
+    # --- Selection helpers (read-through to the store) ------------------
+
+    def _selected_ids(self) -> set[LabelId]:
+        """Current selection as label_ids, sourced from the store."""
+        return self._store.selected
+
+    def _set_selection(self, new_ids: set[LabelId]) -> None:
+        """Submit a new selection to the store. The store fires
+        ``selection_changed`` which triggers our repaint slot."""
+        self._store.set_selection(new_ids)
 
     def set_video(self, path: str):
         self._cancel_prefetch()
@@ -354,7 +302,15 @@ class VideoFrameWidget(QWidget):
     def _extract_frame(self, seconds: float) -> QPixmap | None:
         if not self._video_path:
             return None
-        return extract_frame(self._video_path, seconds)
+        try:
+            img = self._video_service.get_frame(Path(self._video_path), seconds)
+        except VideoServiceError as e:
+            log.warning("get_frame failed for %s @ %s: %s",
+                        self._video_path, seconds, e)
+            return None
+        if img.isNull():
+            return None
+        return QPixmap.fromImage(img)
 
     def _update_scaled_pixmap(self):
         if not self._pixmap or self._pixmap.isNull():
@@ -382,35 +338,50 @@ class VideoFrameWidget(QWidget):
         )
 
     def _update_visible_labels(self, current_time: float):
-        if not self._ass:
+        """Recompute ``self._visible_labels`` from the live store state.
+
+        Labels are sourced from ``self._store.state`` (the source of truth),
+        not from ``self._ass.labels`` -- store mutations don't refresh the
+        AssFile's label list, so reading from state guarantees we see the
+        latest LabelDialogue instances (mutations swap them in via
+        dataclasses.replace).
+        """
+        state = self._store.state
+        if not state.order:
             self._visible_labels = []
         else:
-            self._visible_labels = [
-                lb for lb in self._ass.labels
-                if lb.start_time <= current_time <= lb.end_time
-            ]
-        # Prune selection to only visible labels
-        visible_indices = {lb.line_index for lb in self._visible_labels}
-        old_selected = self._selected
-        self._selected = self._selected & visible_indices
-        if old_selected and not self._selected:
-            self.selection_cleared.emit()
+            visible: list[LabelDialogue] = []
+            for lid in state.order:
+                lb = state.labels[lid]
+                if lb.start_time <= current_time <= lb.end_time:
+                    visible.append(lb)
+            self._visible_labels = visible
+        # Prune selection to only visible labels. Selection is owned by the
+        # store; we ask the store to drop ids that are no longer visible.
+        visible_ids = {lb.label_id for lb in self._visible_labels if lb.label_id}
+        current = self._store.selected
+        pruned = current & visible_ids
+        if pruned != current:
+            self._store.set_selection(pruned)
 
     # ── Coordinate mapping ──
 
     def _ass_to_widget(self, ass_x: float, ass_y: float) -> QPointF:
         if not self._ass:
             return QPointF(ass_x, ass_y)
-        wx = self._frame_x + (ass_x * self._frame_w / self._ass.play_res_x)
-        wy = self._frame_y + (ass_y * self._frame_h / self._ass.play_res_y)
-        return QPointF(wx, wy)
+        ass_size = (self._ass.play_res_x, self._ass.play_res_y)
+        frame_size = (self._frame_w, self._frame_h)
+        inner = _coords_ass_to_widget(QPointF(ass_x, ass_y), ass_size, frame_size)
+        return QPointF(self._frame_x + inner.x(), self._frame_y + inner.y())
 
     def _widget_to_ass(self, wx: float, wy: float) -> tuple[int, int]:
         if not self._ass:
             return int(wx), int(wy)
-        ass_x = (wx - self._frame_x) * self._ass.play_res_x / self._frame_w
-        ass_y = (wy - self._frame_y) * self._ass.play_res_y / self._frame_h
-        return int(round(ass_x)), int(round(ass_y))
+        ass_size = (self._ass.play_res_x, self._ass.play_res_y)
+        frame_size = (self._frame_w, self._frame_h)
+        local = QPointF(wx - self._frame_x, wy - self._frame_y)
+        ass_pt = _coords_widget_to_ass(local, ass_size, frame_size)
+        return int(round(ass_pt.x())), int(round(ass_pt.y()))
 
     # ── Label geometry ──
 
@@ -466,59 +437,26 @@ class VideoFrameWidget(QWidget):
         return font
 
     def _compute_rect(self, label: LabelDialogue, font: QFont) -> QRectF:
-        font_name, base_size, default_bold, default_italic = self._style_for_label(label)
-        segments = parse_rich_text(label.rich_text, default_bold, default_italic)
+        _, _, default_bold, default_italic = self._style_for_label(label)
+        default_alignment = self._ass.label_alignment if self._ass else 2
 
-        # Split segments by \N into lines of segments
-        seg_lines: list[list] = [[]]
-        for seg in segments:
-            parts = seg.text.split("\\N")
-            for i, part in enumerate(parts):
-                if i > 0:
-                    seg_lines.append([])
-                if part:
-                    from ass_parser import TextSegment
-                    seg_lines[-1].append(TextSegment(part, seg.bold, seg.italic))
+        def font_provider(bold_override, italic_override):
+            if bold_override is None and italic_override is None:
+                return font
+            return self._font_for_label(
+                label,
+                bold_override=bold_override,
+                italic_override=italic_override,
+            )
 
-        max_w = 0.0
-        max_line_h = 0.0
-        for seg_line in seg_lines:
-            line_w = 0.0
-            line_h = 0.0
-            for seg in seg_line:
-                seg_font = self._font_for_label(label, bold_override=seg.bold, italic_override=seg.italic)
-                seg_fm = QFontMetricsF(seg_font)
-                line_w += seg_fm.horizontalAdvance(seg.text)
-                line_h = max(line_h, seg_fm.height())
-            if not seg_line:
-                line_h = QFontMetricsF(font).height()
-            max_w = max(max_w, line_w)
-            max_line_h = max(max_line_h, line_h)
-
-        pad_x, pad_y = 6, 4
-        total_w = max_w + 2 * pad_x
-        total_h = max_line_h * len(seg_lines) + 2 * pad_y
-        pos = self._ass_to_widget(label.pos_x, label.pos_y)
-        alignment = label.alignment if label.alignment is not None else (self._ass.label_alignment if self._ass else 2)
-
-        h_align = ((alignment - 1) % 3) + 1
-        v_group = (alignment - 1) // 3
-
-        if h_align == 1:
-            x = pos.x()
-        elif h_align == 3:
-            x = pos.x() - total_w
-        else:
-            x = pos.x() - total_w / 2
-
-        if v_group == 0:  # bottom
-            y = pos.y() - total_h
-        elif v_group == 1:  # middle
-            y = pos.y() - total_h / 2
-        else:  # top
-            y = pos.y()
-
-        return QRectF(x, y, total_w, total_h)
+        return _compute_label_rect(
+            label,
+            default_alignment=default_alignment,
+            default_bold=default_bold,
+            default_italic=default_italic,
+            font_provider=font_provider,
+            ass_pos_to_widget=self._ass_to_widget,
+        )
 
     def _anchor_from_rect(self, rect: QRectF, label: LabelDialogue | None = None) -> QPointF:
         alignment = self._ass.label_alignment if self._ass else 2
@@ -603,11 +541,12 @@ class VideoFrameWidget(QWidget):
 
     def _hit_test_handles(self, pos: QPointF) -> tuple[_DragMode, int, LabelDialogue] | None:
         """Check if pos hits a resize or rotation handle. Single-select only."""
-        if len(self._selected) != 1:
+        selected_ids = self._selected_ids()
+        if len(selected_ids) != 1:
             return None
         label = None
         for lb in self._visible_labels:
-            if lb.line_index in self._selected:
+            if lb.label_id in selected_ids:
                 label = lb
                 break
         if label is None:
@@ -638,13 +577,13 @@ class VideoFrameWidget(QWidget):
     # ── Selection helpers ──
 
     def selected_labels(self) -> list[LabelDialogue]:
-        return [lb for lb in self._visible_labels if lb.line_index in self._selected]
+        selected_ids = self._selected_ids()
+        return [lb for lb in self._visible_labels if lb.label_id in selected_ids]
 
     def clear_selection(self):
-        if self._selected:
-            self._selected.clear()
-            self.selection_cleared.emit()
-            self.update()
+        if self._store.selected:
+            self._store.set_selection(set())
+            # repaint happens via selection_changed slot
 
     # ── Painting ──
 
@@ -659,6 +598,7 @@ class VideoFrameWidget(QWidget):
         # Draw labels
         if self._visible_labels:
             self._label_rects.clear()
+            selected_ids = self._selected_ids()
 
             for label in self._visible_labels:
                 # Skip the label being edited inline
@@ -681,7 +621,7 @@ class VideoFrameWidget(QWidget):
 
                 painter.fillRect(rect, QColor(0, 0, 0, 140))
 
-                is_selected = label.line_index in self._selected
+                is_selected = label.label_id in selected_ids
                 if is_selected:
                     pen = QPen(QColor(74, 158, 255), 2.0, Qt.PenStyle.SolidLine)
                 else:
@@ -712,7 +652,7 @@ class VideoFrameWidget(QWidget):
                 segments = parse_rich_text(label.rich_text, default_bold, default_italic)
 
                 # Split segments by \N into lines
-                from ass_parser import TextSegment
+                from sub_label_pos.model.ass_file import TextSegment
                 seg_lines: list[list[TextSegment]] = [[]]
                 for seg in segments:
                     parts = seg.text.split("\\N")
@@ -771,7 +711,7 @@ class VideoFrameWidget(QWidget):
                     painter.restore()
 
                 # Draw resize/rotate handles for single selection
-                if is_selected and len(self._selected) == 1:
+                if is_selected and len(selected_ids) == 1:
                     self._draw_handles(painter, rect, anchor, rotation)
 
         # Draw hovered label timestamp
@@ -870,10 +810,8 @@ class VideoFrameWidget(QWidget):
             label = self._hit_test(event.position())
             if label:
                 # Select if not already selected
-                if label.line_index not in self._selected:
-                    self._selected = {label.line_index}
-                    self.label_selected.emit(label)
-                    self.update()
+                if label.label_id not in self._selected_ids():
+                    self._set_selection({label.label_id})
                 self.context_menu_requested.emit(event.position())
             else:
                 self.empty_context_menu_requested.emit(event.position())
@@ -970,33 +908,26 @@ class VideoFrameWidget(QWidget):
             self.clear_selection()
             return
 
+        current = self._selected_ids()
+
         if ctrl:
             # Ctrl+click: toggle in/out of multi-selection
             self._cancel_editing()
-            if label.line_index in self._selected:
-                self._selected.discard(label.line_index)
-                if not self._selected:
-                    self.selection_cleared.emit()
-                else:
-                    # Emit for the "primary" selected label
-                    sel = self.selected_labels()
-                    if sel:
-                        self.label_selected.emit(sel[0])
+            new = set(current)
+            if label.label_id in new:
+                new.discard(label.label_id)
             else:
-                self._selected.add(label.line_index)
-                self.label_selected.emit(label)
-            self.update()
+                new.add(label.label_id)
+            self._set_selection(new)
             return
 
         # Plain click on label
-        if label.line_index in self._selected and len(self._selected) == 1:
+        if label.label_id in current and len(current) == 1:
             # Already selected alone — enter edit mode
             self.edit_requested.emit(label)
         else:
             self._cancel_editing()
-            self._selected = {label.line_index}
-            self.label_selected.emit(label)
-            self.update()
+            self._set_selection({label.label_id})
 
     # ── Drag (single + multi) ──
 
@@ -1011,9 +942,8 @@ class VideoFrameWidget(QWidget):
         self._hovered_label = None
 
         # If dragged label isn't selected, select it alone
-        if label.line_index not in self._selected:
-            self._selected = {label.line_index}
-            self.label_selected.emit(label)
+        if label.label_id not in self._selected_ids():
+            self._set_selection({label.label_id})
 
         # Record initial positions for all selected labels
         self._multi_drag_initial = {
@@ -1059,8 +989,9 @@ class VideoFrameWidget(QWidget):
         dragged_xs = [tent_rect.left(), tent_center.x(), tent_rect.right()]
         dragged_ys = [tent_rect.top(), tent_center.y(), tent_rect.bottom()]
 
+        selected_ids = self._selected_ids()
         for other in self._visible_labels:
-            if other.line_index in self._selected:
+            if other.label_id in selected_ids:
                 continue
             other_font = self._font_for_label(other)
             other_rect = self._compute_rect(other, other_font)
@@ -1167,8 +1098,11 @@ class VideoFrameWidget(QWidget):
             return
         scale = current_dist / self._resize_initial_dist
         new_fs = max(_MIN_FONT_SIZE, round(self._resize_initial_fs * scale))
-        if self._ass:
-            self._ass.set_label_font_size(label, new_fs)
+        # Live preview: mutate the LabelDialogue in place. It's the same
+        # Python object the store holds, so the next paint sees the new size
+        # without a mutation round-trip. The final size is committed via the
+        # label_resized signal -> ResizeLabel mutation in _finish_resize.
+        label.font_size = new_fs
         self.label_resized.emit(label, new_fs)
         self.update()
 
@@ -1194,9 +1128,9 @@ class VideoFrameWidget(QWidget):
 
     def _finish_rotate(self):
         label = self._handle_label
-        if label and self._ass:
+        if label:
             rotation = label.rotation if label.rotation is not None else 0.0
-            self._ass.set_label_rotation(label, rotation)
+            # Commit via signal -> RotateLabel mutation in controller.
             self.label_rotated.emit(label, rotation)
         self._handle_label = None
         self.update()
@@ -1335,7 +1269,9 @@ class VideoFrameWidget(QWidget):
                 times.append(t)
         if not times:
             return
-        self._prefetch_worker = FramePrefetchWorker(self._video_path, times)
+        self._prefetch_worker = FramePrefetchWorker(
+            self._video_service, self._video_path, times,
+        )
         self._prefetch_thread = QThread()
         self._prefetch_worker.moveToThread(self._prefetch_thread)
         self._prefetch_thread.started.connect(self._prefetch_worker.run)

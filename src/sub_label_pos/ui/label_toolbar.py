@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QPushButton, QLabel, QComboBox, QCheckBox,
     QColorDialog, QInputDialog, QMenu, QWidgetAction,
 )
+
+if TYPE_CHECKING:
+    from sub_label_pos.model.ass_file import AssStyle, LabelDialogue
+    from sub_label_pos.model.label_store import LabelStore
+    from sub_label_pos.model.types import LabelId
 
 _MIN_FONT_SIZE = 8
 _FONT_STEP = 2
@@ -148,14 +155,17 @@ class LabelToolbar(QWidget):
     apply_style_clicked = pyqtSignal()
     create_style_requested = pyqtSignal(str)
 
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(self, store: "LabelStore", parent: QWidget | None = None):
         super().__init__(parent)
+        self._store = store
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(
             "LabelToolbar { background: #2d2d2d; border: 1px solid #555; border-radius: 4px; }"
         )
         self.setVisible(False)
 
+        # Display-state mirrors of last-shown values. The toolbar derives these
+        # from store signals; outside code MUST NOT mutate them directly.
         self._font_size = 36
         self._outline_width = 2.0
         self._primary_colour = "&H00FFFFFF&"
@@ -281,6 +291,11 @@ class LabelToolbar(QWidget):
         layout.addWidget(self._apply_btn)
 
         self.adjustSize()
+
+        # Subscribe to store signals — the toolbar is the SOLE owner of its
+        # display state and updates itself from the store.
+        self._store.selection_changed.connect(self._on_selection_changed)
+        self._store.labels_mutated.connect(self._on_labels_mutated)
 
     def _make_btn(self, text: str, slot) -> QPushButton:
         btn = QPushButton(text)
@@ -417,62 +432,202 @@ class LabelToolbar(QWidget):
         selected = {k for k, cb in checkboxes if cb.isChecked()}
         self.copy_style_clicked.emit(selected)
 
-    def set_alignment(self, alignment: int | None):
+    # --- Store-signal slots -------------------------------------------
+
+    def _on_selection_changed(self, selected: set) -> None:
+        """Update toolbar display to reflect the new selection.
+
+        On empty selection the toolbar is hidden. On non-empty selection the
+        toolbar reads each selected label from the store, derives the display
+        state, and shows itself. Positioning is left to the parent (MainWindow
+        / J4) since it requires widget-coordinate label rects.
+        """
+        if not selected:
+            self.hide()
+            return
+        self._sync_from_selection(set(selected))
+        self.adjustSize()
+        self.show()
+
+    def _on_labels_mutated(self, affected: set) -> None:
+        """If any affected label is in our selection, refresh display."""
+        sel = self._store.selected
+        if not sel:
+            return
+        if sel & set(affected):
+            self._sync_from_selection(sel)
+            self.adjustSize()
+
+    def _sync_from_selection(self, selected: set) -> None:
+        """Read selected labels from the store and update visible state.
+
+        For multi-select, fields whose values disagree between selected labels
+        fall back to a neutral display (existing displayed value retained;
+        toggle buttons cleared). For single-select, fields show the label's
+        resolved value (per-label override OR the style default).
+        """
+        state = self._store.state
+        labels: list[LabelDialogue] = [
+            state.labels[lid] for lid in selected if lid in state.labels
+        ]
+        if not labels:
+            # Selection refers to ids the store doesn't know about. Hide so
+            # the user doesn't act on stale data.
+            self.hide()
+            return
+
+        styles = state.styles
+        multi = len(labels) > 1
+
+        # --- Single/multi mode toggles ---
+        self._dup_btn.setVisible(not multi)
+        self._copy_btn.setVisible(not multi)
+        self._apply_btn.setVisible(not multi)
+
+        # --- Resolve per-attribute values (with style fallback) ---
+        def resolved_font_size(lb: "LabelDialogue") -> int:
+            if lb.font_size is not None:
+                return lb.font_size
+            st = styles.get(lb.style_name)
+            return st.font_size if st else 36
+
+        def resolved_bool(lb: "LabelDialogue", attr: str) -> bool:
+            v = getattr(lb, attr)
+            if v is not None:
+                return v
+            st = styles.get(lb.style_name)
+            return getattr(st, attr) if st else False
+
+        def resolved_str(lb: "LabelDialogue", attr: str, default: str) -> str:
+            v = getattr(lb, attr)
+            if v is not None:
+                return v
+            st = styles.get(lb.style_name)
+            return getattr(st, attr) if st else default
+
+        def resolved_float(lb: "LabelDialogue", attr: str, default: float) -> float:
+            v = getattr(lb, attr)
+            if v is not None:
+                return v
+            st = styles.get(lb.style_name)
+            return getattr(st, attr) if st else default
+
+        first = labels[0]
+        font_size = resolved_font_size(first)
+        if not multi or all(resolved_font_size(lb) == font_size for lb in labels):
+            self._set_font_size_display(font_size)
+        else:
+            self._set_font_size_display(None)
+
+        # Alignment is a per-label \an override; only the override matters here.
+        alignments = {lb.alignment for lb in labels}
+        eff_alignment = alignments.pop() if len(alignments) == 1 else None
+        self._set_alignment_display(eff_alignment)
+
+        bold = resolved_bool(first, "bold")
+        if multi and not all(resolved_bool(lb, "bold") == bold for lb in labels):
+            self._set_bold_display(None)
+        else:
+            self._set_bold_display(bold)
+
+        italic = resolved_bool(first, "italic")
+        if multi and not all(resolved_bool(lb, "italic") == italic for lb in labels):
+            self._set_italic_display(None)
+        else:
+            self._set_italic_display(italic)
+
+        primary = resolved_str(first, "primary_colour", "&H00FFFFFF&")
+        if multi and not all(resolved_str(lb, "primary_colour", "&H00FFFFFF&") == primary for lb in labels):
+            primary_display = None
+        else:
+            primary_display = primary
+        self._set_primary_colour_display(primary_display)
+
+        outline = resolved_str(first, "outline_colour", "&H00000000&")
+        if multi and not all(resolved_str(lb, "outline_colour", "&H00000000&") == outline for lb in labels):
+            outline_display = None
+        else:
+            outline_display = outline
+        self._set_outline_colour_display(outline_display)
+
+        owidth = resolved_float(first, "outline_width", 2.0)
+        if multi and not all(resolved_float(lb, "outline_width", 2.0) == owidth for lb in labels):
+            self._set_outline_width_display(None)
+        else:
+            self._set_outline_width_display(owidth)
+
+        # Style dropdown: always populated; selected entry is the first label's
+        # style (multi-select shows the first label's style by convention —
+        # the dropdown is not a "mixed" indicator).
+        self._set_styles_display(list(styles.keys()), first.style_name)
+
+    # --- Display setters (None == "mixed / unknown") -------------------
+
+    def _set_font_size_display(self, value: int | None) -> None:
+        if value is None:
+            self._size_label.setText("-")
+        else:
+            self._font_size = value
+            self._size_label.setText(str(value))
+
+    def _set_alignment_display(self, alignment: int | None) -> None:
         effective = alignment if alignment in (4, 5, 6) else None
         for an, btn in self._align_btns.items():
             btn.blockSignals(True)
             btn.setChecked(an == effective)
             btn.blockSignals(False)
 
-    def show_for_label(
-        self,
-        font_size: int,
-        alignment: int | None = None,
-        bold: bool = False,
-        italic: bool = False,
-        style_name: str = "Label",
-        available_styles: list[str] | None = None,
-        primary_colour: str = "&H00FFFFFF&",
-        outline_colour: str = "&H00000000&",
-        outline_width: float = 2.0,
-    ):
-        self._font_size = font_size
-        self._size_label.setText(str(font_size))
-        self.set_alignment(alignment)
-
-        # Bold/Italic state
+    def _set_bold_display(self, bold: bool | None) -> None:
         self._bold_btn.blockSignals(True)
-        self._bold_btn.setChecked(bold)
+        self._bold_btn.setChecked(bool(bold) if bold is not None else False)
         self._bold_btn.blockSignals(False)
 
+    def _set_italic_display(self, italic: bool | None) -> None:
         self._italic_btn.blockSignals(True)
-        self._italic_btn.setChecked(italic)
+        self._italic_btn.setChecked(bool(italic) if italic is not None else False)
         self._italic_btn.blockSignals(False)
 
-        # Colour state
-        self._primary_colour = primary_colour
-        self._outline_colour = outline_colour
-        self._update_colour_btn(self._primary_colour_btn, ass_colour_to_qcolor(primary_colour))
-        self._update_colour_btn(self._outline_colour_btn, ass_colour_to_qcolor(outline_colour))
+    def _set_primary_colour_display(self, colour: str | None) -> None:
+        if colour is None:
+            # Mixed: neutral grey swatch
+            self._primary_colour_btn.setStyleSheet(
+                "QPushButton { background: #555; color: #ddd; border: 1px solid #555;"
+                " border-radius: 3px; font-size: 10px; }"
+            )
+            return
+        self._primary_colour = colour
+        self._update_colour_btn(self._primary_colour_btn, ass_colour_to_qcolor(colour))
 
-        # Outline width
-        self._outline_width = outline_width
-        self._bord_label.setText(str(int(outline_width)))
+    def _set_outline_colour_display(self, colour: str | None) -> None:
+        if colour is None:
+            self._outline_colour_btn.setStyleSheet(
+                "QPushButton { background: #555; color: #ddd; border: 1px solid #555;"
+                " border-radius: 3px; font-size: 10px; }"
+            )
+            return
+        self._outline_colour = colour
+        self._update_colour_btn(self._outline_colour_btn, ass_colour_to_qcolor(colour))
 
-        # Style dropdown — always show with "Add new..." option
-        self._current_style_name = style_name
+    def _set_outline_width_display(self, width: float | None) -> None:
+        if width is None:
+            self._bord_label.setText("-")
+        else:
+            self._outline_width = width
+            self._bord_label.setText(str(int(width)))
+
+    def _set_styles_display(self, available_styles: list[str], current: str) -> None:
+        self._current_style_name = current
         self._style_combo.blockSignals(True)
         self._style_combo.clear()
         if available_styles:
             self._style_combo.addItems(available_styles)
         self._style_combo.addItem("Add new...")
-        idx = self._style_combo.findText(style_name)
+        idx = self._style_combo.findText(current)
         if idx >= 0:
             self._style_combo.setCurrentIndex(idx)
         self._style_combo.blockSignals(False)
 
-        self.adjustSize()
-        self.show()
+    # --- Geometry placement (called by parent after layout) -----------
 
     def position_above(self, rect_center_x: float, rect_top_y: float):
         """Center toolbar above the label rect, clamped to parent bounds."""
@@ -487,10 +642,3 @@ class LabelToolbar(QWidget):
             y = max(0, y)
 
         self.move(x, y)
-
-    def set_multi_mode(self, multi: bool):
-        """In multi-select mode, hide single-label-only actions."""
-        self._dup_btn.setVisible(not multi)
-        self._copy_btn.setVisible(not multi)
-        self._apply_btn.setVisible(not multi)
-        self.adjustSize()

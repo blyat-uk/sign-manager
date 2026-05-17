@@ -55,7 +55,7 @@ def main():
         )
         sys.exit(1)
 
-    from main_window import MainWindow
+    from sub_label_pos.ui.main_window import MainWindow
 
     win = MainWindow()
     win.show()

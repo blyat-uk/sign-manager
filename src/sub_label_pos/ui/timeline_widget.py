@@ -11,7 +11,8 @@ from PyQt6.QtWidgets import (
     QLabel,
 )
 
-from ass_parser import _seconds_to_time
+from sub_label_pos.model.ass_file import _seconds_to_time
+from sub_label_pos.model.groups import DerivedGroupModel
 
 
 class _TrackWidget(QWidget):
@@ -142,8 +143,9 @@ class TimelineWidget(QWidget):
     step_requested = pyqtSignal(int)
     group_clicked = pyqtSignal(int)
 
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(self, groups: DerivedGroupModel, parent: QWidget | None = None):
         super().__init__(parent)
+        self._groups = groups
         self._duration: float = 0.0
         self._playing = False
 
@@ -207,6 +209,10 @@ class TimelineWidget(QWidget):
         self._track.seeked.connect(self._on_track_seeked)
         self._track.group_clicked.connect(self.group_clicked)
 
+        # Subscribe to group model so markers stay in sync with state.
+        groups.groups_changed.connect(self._on_groups_changed)
+        self._refresh_markers()
+
         # Layout
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 4)
@@ -228,14 +234,12 @@ class TimelineWidget(QWidget):
         self._track.set_duration(duration)
         self._update_time_label(self._track._position)
 
-    def set_groups(self, groups: list) -> None:
-        """Set label group markers on the track. Accepts list of LabelGroup."""
-        ranges = []
-        for g in groups:
-            if g.labels:
-                start = min(lb.start_time for lb in g.labels)
-                end = max(lb.end_time for lb in g.labels)
-                ranges.append((start, end))
+    def _on_groups_changed(self, _changed_ids: set) -> None:
+        """Repaint group markers from the model."""
+        self._refresh_markers()
+
+    def _refresh_markers(self) -> None:
+        ranges = [(g.start, g.end) for g in self._groups.groups]
         self._track.set_group_ranges(ranges)
 
     def set_playing(self, playing: bool) -> None:

@@ -59,12 +59,12 @@ git clone https://codeberg.org/BuGiPoP/sub-label-pos.git
 cd sub-label-pos
 ```
 
-### 3. Set up a virtual environment and install PyQt6
+### 3. Set up a virtual environment and install the package
 
 ```
 python3 -m venv .venv
 source .venv/bin/activate
-pip install PyQt6
+pip install -e .[dev]
 ```
 
 On Windows, replace the activate line with:
@@ -76,7 +76,7 @@ On Windows, replace the activate line with:
 ### 4. Run the application
 
 ```
-python main.py
+sub-label-pos
 ```
 
 ## Usage
@@ -103,6 +103,8 @@ python main.py
 | Ctrl + Left / Right | Previous / next label group |
 | Ctrl + Shift + Left / Right | Previous / next file (folder mode) |
 | Ctrl + S | Save the ASS file |
+| Ctrl + Z | Undo |
+| Ctrl + Shift + Z / Ctrl + Y | Redo |
 | Delete | Delete selected labels |
 
 ### Saving
@@ -112,6 +114,14 @@ Press **Save ASS** in the toolbar or use Ctrl+S. The application warns about uns
 ## How it works
 
 The application extracts individual video frames using FFmpeg rather than playing the video. Labels from the ASS subtitle file are rendered as overlays on the video frame using Qt's painting system. When you reposition a label, the `\pos()` tag in the ASS file is updated in place. The font rendering applies a correction factor to match how libass (used by players like mpv) interprets font sizes, so label positions in this editor correspond accurately to what you see during playback.
+
+### Development
+
+To run the test suite (247 tests):
+
+```
+pytest
+```
 
 ## License
 

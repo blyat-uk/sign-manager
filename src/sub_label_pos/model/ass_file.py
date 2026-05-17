@@ -1,5 +1,14 @@
+import hashlib
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from sub_label_pos.model.text_segment import TextSegment  # noqa: F401  (re-exported)
+from sub_label_pos.model.types import LabelId
+
+if TYPE_CHECKING:
+    from sub_label_pos.model.label_state import LabelState
 
 
 @dataclass
@@ -14,13 +23,6 @@ class AssStyle:
     outline_colour: str = "&H00000000&"
     outline_width: float = 2.0
     raw_fields: list[str] = field(default_factory=list)
-
-
-@dataclass
-class TextSegment:
-    text: str
-    bold: bool
-    italic: bool
 
 
 @dataclass
@@ -41,6 +43,13 @@ class LabelDialogue:
     outline_width: float | None = None  # per-label \bord override
     rotation: float | None = None  # per-label \frz override in degrees
     rich_text: str = ""  # text with inline override blocks (leading block stripped)
+    label_id: str = ""  # stable per-label id assigned at parse time
+
+
+def _make_label_id(line_index: int, raw_line: str) -> LabelId:
+    """Compute a stable per-label id from line index + raw line bytes."""
+    h = hashlib.blake2b(raw_line.encode("utf-8"), digest_size=8).hexdigest()
+    return LabelId(f"L{line_index:04d}-{h}")
 
 
 def _time_to_seconds(t: str) -> float:
@@ -62,7 +71,6 @@ def _seconds_to_time(sec: float) -> str:
 
 
 _POS_RE = re.compile(r"\{[^}]*\\pos\((-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)\)[^}]*\}")
-_POS_TAG_RE = re.compile(r"\\pos\(-?[\d.]+,-?[\d.]+\)")
 _FS_TAG_RE = re.compile(r"\\fs(\d+)")
 _AN_TAG_RE = re.compile(r"\\an(\d)")
 _B_TAG_RE = re.compile(r"\\b(\d)")
@@ -75,184 +83,287 @@ _OVERRIDE_BLOCK_RE = re.compile(r"\{[^}]*\}")
 _LEADING_BLOCK_RE = re.compile(r"^\{[^}]*\}")
 
 
-def parse_rich_text(rich_text: str, default_bold: bool, default_italic: bool) -> list[TextSegment]:
-    """Parse rich_text (with inline override blocks) into TextSegments."""
-    segments: list[TextSegment] = []
-    cur_bold = default_bold
-    cur_italic = default_italic
-    pos = 0
-    text = rich_text
-
-    while pos < len(text):
-        if text[pos] == '{':
-            end = text.find('}', pos)
-            if end == -1:
-                # No closing brace, treat rest as text
-                segments.append(TextSegment(text[pos:], cur_bold, cur_italic))
-                break
-            block = text[pos:end + 1]
-            # Process bold/italic tags in this block
-            for bm in _B_TAG_RE.finditer(block):
-                cur_bold = bm.group(1) != '0'
-            for im in _I_TAG_RE.finditer(block):
-                cur_italic = im.group(1) != '0'
-            pos = end + 1
-        else:
-            # Find next override block or end
-            next_block = text.find('{', pos)
-            if next_block == -1:
-                chunk = text[pos:]
-                pos = len(text)
-            else:
-                chunk = text[pos:next_block]
-                pos = next_block
-            if chunk:
-                segments.append(TextSegment(chunk, cur_bold, cur_italic))
-
-    return segments if segments else [TextSegment("", default_bold, default_italic)]
+# Rich-text (ASS<->segments<->HTML) conversions moved to geometry.rich_text.
+# Re-exported here for backwards compatibility with existing callers.
+from sub_label_pos.geometry.rich_text import (  # noqa: E402,F401
+    parse_rich_text,
+    segments_to_ass,
+    segments_to_html,
+    html_to_segments,
+)
 
 
-def segments_to_ass(segments: list[TextSegment], default_bold: bool, default_italic: bool) -> str:
-    """Convert TextSegments back to ASS text with minimal inline override blocks."""
-    result: list[str] = []
-    cur_bold = default_bold
-    cur_italic = default_italic
-
-    for seg in segments:
-        tags: list[str] = []
-        if seg.bold != cur_bold:
-            tags.append(f"\\b{'1' if seg.bold else '0'}")
-            cur_bold = seg.bold
-        if seg.italic != cur_italic:
-            tags.append(f"\\i{'1' if seg.italic else '0'}")
-            cur_italic = seg.italic
-        if tags:
-            result.append("{" + "".join(tags) + "}")
-        result.append(seg.text)
-
-    return "".join(result)
+_V4_FORMAT_LINE = (
+    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+    "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+    "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+    "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+)
+_EVENTS_FORMAT_LINE = (
+    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
+    "Effect, Text\n"
+)
 
 
-def segments_to_html(segments: list[TextSegment]) -> str:
-    """Convert TextSegments to HTML for QTextEdit."""
-    parts: list[str] = []
-    for seg in segments:
-        text = seg.text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        # Convert \N to actual newlines for HTML
-        text = text.replace("\\N", "<br>")
-        if seg.bold and seg.italic:
-            parts.append(f"<b><i>{text}</i></b>")
-        elif seg.bold:
-            parts.append(f"<b>{text}</b>")
-        elif seg.italic:
-            parts.append(f"<i>{text}</i>")
-        else:
-            parts.append(text)
-    return "".join(parts)
+def _style_to_line(style: "AssStyle") -> str:
+    """Render an AssStyle as a "Style:" line, preferring raw_fields when present."""
+    if style.raw_fields:
+        # raw_fields is the parsed split of an existing Style line.
+        return "Style:" + ",".join(style.raw_fields) + "\n"
+    # Synthesize a 23-field default Style line.
+    fields = [
+        f" {style.name}",
+        style.font_name,
+        str(style.font_size),
+        style.primary_colour,
+        "&H000000FF&",
+        style.outline_colour,
+        "&H00000000&",
+        "1" if style.bold else "0",
+        "1" if style.italic else "0",
+        "0", "0",
+        "100", "100", "0", "0",
+        "1",
+        f"{style.outline_width:g}",
+        "0",
+        str(style.alignment),
+        "10", "10", "10", "1",
+    ]
+    return "Style:" + ",".join(fields) + "\n"
 
 
-def html_to_segments(html: str) -> list[TextSegment]:
-    """Parse Qt HTML output into TextSegments.
+def _default_header_lines(
+    styles: dict[str, "AssStyle"], play_res_x: int, play_res_y: int,
+) -> list[str]:
+    """Build a minimal Script Info + V4+ Styles header from a styles dict."""
+    lines = [
+        "[Script Info]\n",
+        f"PlayResX: {play_res_x}\n",
+        f"PlayResY: {play_res_y}\n",
+        "\n",
+        "[V4+ Styles]\n",
+        _V4_FORMAT_LINE,
+    ]
+    for style in styles.values():
+        lines.append(_style_to_line(style))
+    lines.append("\n")
+    return lines
 
-    Qt's toHtml() produces a full document with <head>/<style> blocks.
-    We skip everything outside <body> and inside <style>/<head> tags.
+
+def _ensure_events_header(header: list[str]) -> list[str]:
+    """Ensure the header list ends with the [Events] + Format lines.
+
+    If the supplied header already contains an [Events] section, return it
+    untouched (a Format line will already be present in a well-formed file).
+    Otherwise append the [Events] header so the caller can safely concat
+    Dialogue lines after the returned list.
     """
-    from html.parser import HTMLParser
+    has_events = any(ln.strip().lower().startswith("[events]") for ln in header)
+    if has_events:
+        return list(header)
+    out = list(header)
+    if out and not out[-1].endswith("\n"):
+        out[-1] = out[-1] + "\n"
+    if not out or out[-1].strip() != "":
+        out.append("\n")
+    out.append("[Events]\n")
+    out.append(_EVENTS_FORMAT_LINE)
+    return out
 
-    segments: list[TextSegment] = []
-    bold_stack: list[bool] = [False]
-    italic_stack: list[bool] = [False]
-    skip_depth: int = 0  # > 0 means we're inside <head>/<style>, skip text
-    p_count: int = 0  # track paragraph boundaries for \N insertion
 
-    class Parser(HTMLParser):
-        nonlocal skip_depth, p_count
+def _dialogue_line_from_label(label: "LabelDialogue") -> str:
+    """Render a LabelDialogue as a complete "Dialogue:" line (with trailing \\n).
 
-        def handle_starttag(self, tag, attrs):
-            nonlocal skip_depth, p_count
-            if tag in ("head", "style"):
-                skip_depth += 1
-                return
-            if skip_depth > 0:
-                return
-            attr_dict = dict(attrs)
-            style = attr_dict.get("style", "")
-            if tag == "p":
-                # Each <p> after the first means a line break (Enter key)
-                if p_count > 0:
-                    segments.append(TextSegment("\\N", bold_stack[-1], italic_stack[-1]))
-                p_count += 1
-            elif tag in ("b", "strong"):
-                bold_stack.append(True)
-            elif tag in ("i", "em"):
-                italic_stack.append(True)
-            elif tag == "span":
-                # Qt uses inline styles like font-weight:700 and font-style:italic
-                is_bold = bold_stack[-1]
-                is_italic = italic_stack[-1]
-                if "font-weight:" in style:
-                    weight_match = re.search(r"font-weight:\s*(\w+)", style)
-                    if weight_match:
-                        val = weight_match.group(1)
-                        is_bold = val in ("bold", "700", "800", "900")
-                if "font-style:" in style:
-                    style_match = re.search(r"font-style:\s*(\w+)", style)
-                    if style_match:
-                        is_italic = style_match.group(1) == "italic"
-                bold_stack.append(is_bold)
-                italic_stack.append(is_italic)
-            elif tag == "br":
-                segments.append(TextSegment("\\N", bold_stack[-1], italic_stack[-1]))
+    The leading override block is composed from the explicit fields on the
+    LabelDialogue (always starting with \\pos), then ``label.rich_text`` is
+    appended -- which already includes any inline override blocks that the
+    user authored beyond the leading one. If ``rich_text`` itself starts
+    with a leading override block (because the snapshot was just read from
+    a freshly parsed AssFile and never normalized), that block is stripped
+    first so we don't end up with two leading blocks on the saved line.
+    """
+    leading_parts: list[str] = [rf"\pos({label.pos_x},{label.pos_y})"]
+    if label.alignment is not None:
+        leading_parts.append(rf"\an{label.alignment}")
+    if label.font_size is not None:
+        leading_parts.append(rf"\fs{label.font_size}")
+    if label.bold is not None:
+        leading_parts.append(rf"\b{1 if label.bold else 0}")
+    if label.italic is not None:
+        leading_parts.append(rf"\i{1 if label.italic else 0}")
+    if label.primary_colour is not None:
+        leading_parts.append(rf"\c{label.primary_colour}")
+    if label.outline_colour is not None:
+        leading_parts.append(rf"\3c{label.outline_colour}")
+    if label.outline_width is not None:
+        leading_parts.append(rf"\bord{label.outline_width:g}")
+    if label.rotation is not None:
+        leading_parts.append(rf"\frz{label.rotation:g}")
+    leading_block = "{" + "".join(leading_parts) + "}"
 
-        def handle_endtag(self, tag):
-            nonlocal skip_depth
-            if tag in ("head", "style"):
-                skip_depth = max(0, skip_depth - 1)
-                return
-            if skip_depth > 0:
-                return
-            if tag in ("b", "strong") and len(bold_stack) > 1:
-                bold_stack.pop()
-            elif tag in ("i", "em") and len(italic_stack) > 1:
-                italic_stack.pop()
-            elif tag == "span":
-                if len(bold_stack) > 1:
-                    bold_stack.pop()
-                if len(italic_stack) > 1:
-                    italic_stack.pop()
+    # rich_text from the parser includes everything AFTER the original
+    # leading block -- so it may contain inline blocks like {\b1}bold{\b0}
+    # but should NOT start with a {...\pos...} block. Defensive strip in
+    # case a snapshot still has its leading block attached.
+    body = label.rich_text if label.rich_text else label.text
+    leading_match = _LEADING_BLOCK_RE.match(body)
+    if leading_match and r"\pos" in leading_match.group(0):
+        body = body[leading_match.end():]
 
-        def handle_data(self, data):
-            if skip_depth > 0 or not data:
-                return
-            # Skip whitespace-only runs (inter-tag whitespace from Qt's HTML)
-            if not data.strip():
-                return
-            segments.append(TextSegment(data, bold_stack[-1], italic_stack[-1]))
-
-    parser = Parser()
-    parser.feed(html)
-
-    # Merge adjacent segments with same formatting
-    if not segments:
-        return [TextSegment("", False, False)]
-    merged: list[TextSegment] = [segments[0]]
-    for seg in segments[1:]:
-        if seg.bold == merged[-1].bold and seg.italic == merged[-1].italic:
-            merged[-1] = TextSegment(merged[-1].text + seg.text, seg.bold, seg.italic)
-        else:
-            merged.append(seg)
-    return merged
+    start_str = _seconds_to_time(label.start_time)
+    end_str = _seconds_to_time(label.end_time)
+    style = label.style_name or "Default"
+    return f"Dialogue: 0,{start_str},{end_str},{style},,0,0,0,,{leading_block}{body}\n"
 
 
 class AssFile:
-    def __init__(self, path: str):
+    def __init__(self, path: str | None = None):
         self.path = path
         self.lines: list[str] = []
         self.play_res_x: int = 1920
         self.play_res_y: int = 1080
         self.styles: dict[str, AssStyle] = {}
         self.labels: list[LabelDialogue] = []
-        self._parse(path)
+        if path is not None:
+            self._parse(path)
+
+    @classmethod
+    def from_path(cls, path: str | Path) -> "AssFile":
+        """Construct an AssFile by reading bytes from disk."""
+        return cls(str(path))
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> "AssFile":
+        """Construct an AssFile by parsing bytes."""
+        inst = cls.__new__(cls)
+        inst.path = None
+        inst.lines = []
+        inst.play_res_x = 1920
+        inst.play_res_y = 1080
+        inst.styles = {}
+        inst.labels = []
+        inst._parse_text(data.decode("utf-8-sig"))
+        return inst
+
+    @classmethod
+    def from_state(
+        cls,
+        state: "LabelState",
+        header_lines: list[str] | None = None,
+        play_res_x: int = 1920,
+        play_res_y: int = 1080,
+    ) -> "AssFile":
+        """Build a fresh AssFile from a LabelState snapshot.
+
+        Reconstructs ``self.lines`` by combining preserved ``header_lines``
+        (everything before the [Events] section -- Script Info + V4+ Styles)
+        with a freshly synthesized [Events] section built from
+        ``state.order`` / ``state.labels`` / ``state.styles``.
+
+        If ``header_lines`` is None, a minimal default header is generated
+        from ``state.styles``.
+
+        The styles dict on the resulting AssFile comes from ``state.styles``;
+        the label list is rebuilt from each LabelDialogue's preserved
+        ``rich_text`` plus a freshly composed leading override block.
+        """
+        inst = cls.__new__(cls)
+        inst.path = None
+        inst.play_res_x = play_res_x
+        inst.play_res_y = play_res_y
+        inst.styles = dict(state.styles)
+        inst.labels = []
+
+        # 1) Header (everything before [Events]).
+        if header_lines is not None:
+            header = [ln if ln.endswith("\n") else ln + "\n" for ln in header_lines]
+        else:
+            header = _default_header_lines(state.styles, play_res_x, play_res_y)
+
+        # Detect play res from header if present (overrides the defaults).
+        for ln in header:
+            stripped = ln.strip()
+            if stripped.startswith("PlayResX:"):
+                try:
+                    inst.play_res_x = int(stripped.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+            elif stripped.startswith("PlayResY:"):
+                try:
+                    inst.play_res_y = int(stripped.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+
+        # Ensure header ends with [Events] + Format line; if not, append.
+        events_header = _ensure_events_header(header)
+
+        lines: list[str] = list(events_header)
+
+        # 2) Dialogue lines, one per label in state.order.
+        for i, lid in enumerate(state.order):
+            dlg = state.labels[lid]
+            line = _dialogue_line_from_label(dlg)
+            lines.append(line)
+            # Mirror the dialogue onto a new LabelDialogue with line_index
+            # pointing into the freshly built file.
+            new_dlg = LabelDialogue(
+                line_index=len(lines) - 1,
+                start_time=dlg.start_time,
+                end_time=dlg.end_time,
+                pos_x=dlg.pos_x,
+                pos_y=dlg.pos_y,
+                text=dlg.text,
+                font_size=dlg.font_size,
+                alignment=dlg.alignment,
+                style_name=dlg.style_name,
+                bold=dlg.bold,
+                italic=dlg.italic,
+                primary_colour=dlg.primary_colour,
+                outline_colour=dlg.outline_colour,
+                outline_width=dlg.outline_width,
+                rotation=dlg.rotation,
+                rich_text=dlg.rich_text,
+                label_id=dlg.label_id,
+            )
+            inst.labels.append(new_dlg)
+
+        inst.lines = lines
+        return inst
+
+    def serialize(self) -> bytes:
+        """Serialize back to ASS bytes (UTF-8 with BOM, matching save())."""
+        return "".join(self.lines).encode("utf-8-sig")
+
+    @property
+    def events_start_index(self) -> int:
+        """Index of the first line inside the [Events] section header.
+
+        Returns the position of the ``[Events]`` line if present (so the
+        slice ``self.lines[:events_start_index]`` is everything before
+        [Events]; the user can pass it as ``header_lines`` to
+        :meth:`from_state` to preserve Script Info + V4+ Styles intact).
+
+        If no [Events] header is found, returns the index of the first
+        Dialogue line. If neither exists, returns ``len(self.lines)``.
+        """
+        for i, line in enumerate(self.lines):
+            if line.strip().lower().startswith("[events]"):
+                return i
+        for i, line in enumerate(self.lines):
+            if line.strip().startswith("Dialogue:"):
+                return i
+        return len(self.lines)
+
+    def label_by_id(self, label_id: LabelId | str) -> "LabelDialogue":
+        """Look up a label by its LabelId."""
+        for lbl in self.labels:
+            if lbl.label_id == label_id:
+                return lbl
+        raise KeyError(label_id)
+
+    def styles_by_name(self) -> dict[str, AssStyle]:
+        """Return a dict mapping style name to AssStyle."""
+        return dict(self.styles)
 
     @property
     def label_font_name(self) -> str:
@@ -281,7 +392,11 @@ class AssFile:
 
     def _parse(self, path: str):
         with open(path, "r", encoding="utf-8-sig") as f:
-            self.lines = f.read().splitlines(keepends=True)
+            text = f.read()
+        self._parse_text(text)
+
+    def _parse_text(self, text: str):
+        self.lines = text.splitlines(keepends=True)
 
         # If the file didn't have line endings, add them back
         self.lines = [
@@ -335,6 +450,7 @@ class AssFile:
 
         # Parse [Events] dialogues with \pos() whose style is in self.styles
         self.labels.clear()
+        event_index = 0
         for i, line in enumerate(self.lines):
             stripped = line.strip()
             if not stripped.startswith("Dialogue:"):
@@ -413,171 +529,10 @@ class AssFile:
                     outline_width=outline_width,
                     rotation=rotation,
                     rich_text=rich_text,
+                    label_id=_make_label_id(event_index, line),
                 )
             )
-
-    def set_label_position(self, label: LabelDialogue, new_x: int, new_y: int):
-        """Update a label's position in-place, preserving other override tags."""
-        label.pos_x = new_x
-        label.pos_y = new_y
-        old_line = self.lines[label.line_index]
-        # Surgically replace only the \pos() tag, preserving \fs and other tags
-        new_line = _POS_TAG_RE.sub(
-            rf"\\pos({new_x},{new_y})", old_line, count=1
-        )
-        self.lines[label.line_index] = new_line
-
-    def set_label_font_size(self, label: LabelDialogue, size: int):
-        """Set/update \\fs in the override block for a label."""
-        label.font_size = size
-        old_line = self.lines[label.line_index]
-        if _FS_TAG_RE.search(old_line):
-            # Replace existing \fs tag
-            new_line = _FS_TAG_RE.sub(rf"\\fs{size}", old_line, count=1)
-        else:
-            # Insert \fs right after \pos(...) inside the override block
-            new_line = _POS_TAG_RE.sub(
-                lambda m: m.group(0) + rf"\fs{size}", old_line, count=1
-            )
-        self.lines[label.line_index] = new_line
-
-    def set_label_alignment(self, label: LabelDialogue, alignment: int):
-        """Set/update \\an in the override block for a label."""
-        label.alignment = alignment
-        old_line = self.lines[label.line_index]
-        if _AN_TAG_RE.search(old_line):
-            new_line = _AN_TAG_RE.sub(rf"\\an{alignment}", old_line, count=1)
-        else:
-            # Insert \an right after \pos(...) inside the override block
-            new_line = _POS_TAG_RE.sub(
-                lambda m: m.group(0) + rf"\an{alignment}", old_line, count=1
-            )
-        self.lines[label.line_index] = new_line
-
-    def set_label_bold(self, label: LabelDialogue, bold: bool):
-        """Set/update \\b in the leading override block for a label."""
-        label.bold = bold
-        old_line = self.lines[label.line_index]
-        tag = rf"\b{1 if bold else 0}"
-        # Check if there's already a \b tag in the leading block
-        leading_match = _LEADING_BLOCK_RE.search(old_line.split(",", 9)[9] if old_line.strip().startswith("Dialogue:") else old_line)
-        if leading_match:
-            block = leading_match.group(0)
-            b_match = _B_TAG_RE.search(block)
-            if b_match:
-                new_block = block[:b_match.start()] + tag + block[b_match.end():]
-                new_line = old_line.replace(block, new_block, 1)
-            else:
-                # Insert after \pos(...)
-                new_line = _POS_TAG_RE.sub(
-                    lambda m: m.group(0) + tag, old_line, count=1
-                )
-            self.lines[label.line_index] = new_line
-
-    def set_label_italic(self, label: LabelDialogue, italic: bool):
-        """Set/update \\i in the leading override block for a label."""
-        label.italic = italic
-        old_line = self.lines[label.line_index]
-        tag = rf"\i{1 if italic else 0}"
-        leading_match = _LEADING_BLOCK_RE.search(old_line.split(",", 9)[9] if old_line.strip().startswith("Dialogue:") else old_line)
-        if leading_match:
-            block = leading_match.group(0)
-            i_match = _I_TAG_RE.search(block)
-            if i_match:
-                new_block = block[:i_match.start()] + tag + block[i_match.end():]
-                new_line = old_line.replace(block, new_block, 1)
-            else:
-                new_line = _POS_TAG_RE.sub(
-                    lambda m: m.group(0) + tag, old_line, count=1
-                )
-            self.lines[label.line_index] = new_line
-
-    def set_label_primary_colour(self, label: LabelDialogue, colour: str):
-        """Set/update \\c (primary colour) in the leading override block."""
-        label.primary_colour = colour
-        old_line = self.lines[label.line_index]
-        tag = rf"\c{colour}"
-        leading_match = _LEADING_BLOCK_RE.search(old_line.split(",", 9)[9] if old_line.strip().startswith("Dialogue:") else old_line)
-        if leading_match:
-            block = leading_match.group(0)
-            c_match = _C_TAG_RE.search(block)
-            if c_match:
-                new_block = block[:c_match.start()] + tag + block[c_match.end():]
-                new_line = old_line.replace(block, new_block, 1)
-            else:
-                new_line = _POS_TAG_RE.sub(
-                    lambda m: m.group(0) + tag, old_line, count=1
-                )
-            self.lines[label.line_index] = new_line
-
-    def set_label_outline_colour(self, label: LabelDialogue, colour: str):
-        """Set/update \\3c (outline colour) in the leading override block."""
-        label.outline_colour = colour
-        old_line = self.lines[label.line_index]
-        tag = rf"\3c{colour}"
-        leading_match = _LEADING_BLOCK_RE.search(old_line.split(",", 9)[9] if old_line.strip().startswith("Dialogue:") else old_line)
-        if leading_match:
-            block = leading_match.group(0)
-            c3_match = _3C_TAG_RE.search(block)
-            if c3_match:
-                new_block = block[:c3_match.start()] + tag + block[c3_match.end():]
-                new_line = old_line.replace(block, new_block, 1)
-            else:
-                new_line = _POS_TAG_RE.sub(
-                    lambda m: m.group(0) + tag, old_line, count=1
-                )
-            self.lines[label.line_index] = new_line
-
-    def set_label_outline_width(self, label: LabelDialogue, width: float):
-        """Set/update \\bord (outline width) in the leading override block."""
-        label.outline_width = width
-        old_line = self.lines[label.line_index]
-        width_str = f"{width:g}"
-        tag = rf"\bord{width_str}"
-        leading_match = _LEADING_BLOCK_RE.search(old_line.split(",", 9)[9] if old_line.strip().startswith("Dialogue:") else old_line)
-        if leading_match:
-            block = leading_match.group(0)
-            bord_match = _BORD_TAG_RE.search(block)
-            if bord_match:
-                new_block = block[:bord_match.start()] + tag + block[bord_match.end():]
-                new_line = old_line.replace(block, new_block, 1)
-            else:
-                new_line = _POS_TAG_RE.sub(
-                    lambda m: m.group(0) + tag, old_line, count=1
-                )
-            self.lines[label.line_index] = new_line
-
-    def set_label_rotation(self, label: LabelDialogue, degrees: float):
-        """Set/update \\frz in the leading override block for a label."""
-        label.rotation = degrees
-        old_line = self.lines[label.line_index]
-        tag = rf"\frz{degrees:g}"
-        leading_match = _LEADING_BLOCK_RE.search(old_line.split(",", 9)[9] if old_line.strip().startswith("Dialogue:") else old_line)
-        if leading_match:
-            block = leading_match.group(0)
-            frz_match = _FRZ_TAG_RE.search(block)
-            if frz_match:
-                new_block = block[:frz_match.start()] + tag + block[frz_match.end():]
-                new_line = old_line.replace(block, new_block, 1)
-            else:
-                new_line = _POS_TAG_RE.sub(
-                    lambda m: m.group(0) + tag, old_line, count=1
-                )
-            self.lines[label.line_index] = new_line
-
-    def set_label_times(self, label: LabelDialogue, start: float, end: float):
-        """Update start/end times (fields 1 and 2) in the raw dialogue line."""
-        label.start_time = start
-        label.end_time = end
-        old_line = self.lines[label.line_index]
-        stripped = old_line.strip()
-        after = stripped.split("Dialogue:", 1)[1]
-        parts = after.split(",", 9)
-        if len(parts) < 10:
-            return
-        parts[1] = _seconds_to_time(start)
-        parts[2] = _seconds_to_time(end)
-        self.lines[label.line_index] = "Dialogue:" + ",".join(parts) + "\n"
+            event_index += 1
 
     def set_label_style(self, label: LabelDialogue, style_name: str):
         """Change the style (field 3) in the raw dialogue line.
@@ -599,42 +554,6 @@ class AssFile:
             return
         parts[3] = style_name
         self.lines[label.line_index] = "Dialogue:" + ",".join(parts) + "\n"
-
-    def set_label_text(self, label: LabelDialogue, new_text: str):
-        """Update display text, preserving the override block."""
-        label.text = new_text
-        label.rich_text = new_text
-        old_line = self.lines[label.line_index]
-        # Split into the 10 dialogue fields
-        stripped = old_line.strip()
-        after = stripped.split("Dialogue:", 1)[1]
-        parts = after.split(",", 9)
-        if len(parts) < 10:
-            return
-        old_text_field = parts[9]
-        # Extract the leading override block
-        leading_match = _LEADING_BLOCK_RE.search(old_text_field)
-        leading_block = leading_match.group(0) if leading_match else ""
-        # Rebuild: leading block + new display text
-        parts[9] = leading_block + new_text + "\n"
-        new_after = ",".join(parts)
-        self.lines[label.line_index] = "Dialogue:" + new_after
-
-    def set_label_rich_text(self, label: LabelDialogue, rich_text: str):
-        """Update text content with rich formatting (inline override blocks)."""
-        label.rich_text = rich_text
-        label.text = _OVERRIDE_BLOCK_RE.sub("", rich_text).strip()
-        old_line = self.lines[label.line_index]
-        stripped = old_line.strip()
-        after = stripped.split("Dialogue:", 1)[1]
-        parts = after.split(",", 9)
-        if len(parts) < 10:
-            return
-        old_text_field = parts[9]
-        leading_match = _LEADING_BLOCK_RE.search(old_text_field)
-        leading_block = leading_match.group(0) if leading_match else ""
-        parts[9] = leading_block + rich_text + "\n"
-        self.lines[label.line_index] = "Dialogue:" + ",".join(parts)
 
     def add_label(
         self,
@@ -717,6 +636,7 @@ class AssFile:
             outline_width=outline_width,
             rotation=rotation,
             rich_text=rich_text if rich_text else text,
+            label_id=_make_label_id(len(self.labels), line),
         )
         self.labels.append(new_label)
         return new_label

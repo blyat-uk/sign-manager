@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sub-label-pos"
+version = "0.1.0"
+description = "Desktop application for visually editing label positions in ASS subtitle files"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "BuGiPoP" }]
+dependencies = [
+    "PyQt6>=6.5",
+    "python-mpv>=1.0.5",
+]
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6.0"]
+dev = [
+    "pytest>=8",
+    "pytest-mock>=3.12",
+]
+
+[project.scripts]
+sub-label-pos = "sub_label_pos.app:main"
+
+[project.urls]
+Repository = "https://codeberg.org/BuGiPoP/sub-label-pos"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sub_label_pos"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra"

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QPointF, QRectF, QThread, pyqtSignal, QObject, QThreadPool, QRunnable, QSettings, QSize
-from PyQt6.QtGui import QColor, QCursor, QKeySequence, QDragEnterEvent, QDropEvent, QShortcut, QCloseEvent, QImage, QFont
+from PyQt6.QtGui import QAction, QColor, QCursor, QKeySequence, QDragEnterEvent, QDropEvent, QShortcut, QCloseEvent, QImage, QFont
 from PyQt6.QtWidgets import (
     QMainWindow,
     QToolBar,
@@ -24,22 +24,36 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QPushButton,
     QStackedWidget,
+    QStyle,
     QDialog,
     QDialogButtonBox,
     QCheckBox,
     QComboBox,
 )
 
-from ass_parser import (
+from sub_label_pos.model.ass_file import (
     AssFile, LabelDialogue, _seconds_to_time,
     _FS_TAG_RE, _AN_TAG_RE, _B_TAG_RE, _I_TAG_RE,
     _C_TAG_RE, _3C_TAG_RE, _BORD_TAG_RE,
 )
-from video_widget import VideoFrameWidget, VideoSetupWorker, detect_fps, detect_duration, _get_video_dimensions, extract_frame_as_image
-from gallery_widget import GalleryPanel, LabelGroup, compute_label_groups, _crop_to_labels_image, _best_representative_time
-from label_toolbar import LabelToolbar
-from mpv_preview import MpvPreviewWidget
-from timeline_widget import TimelineWidget
+from sub_label_pos.model.groups import DerivedGroupModel
+from sub_label_pos.model.label_store import LabelStore
+from sub_label_pos.services.exceptions import VideoServiceError
+from sub_label_pos.services.ffmpeg_service import FFmpegVideoService
+from sub_label_pos.services.frame_cache import FrameCache
+from sub_label_pos.services.frame_request_queue import FrameRequestQueue
+from sub_label_pos.services.mpv_service import MpvPreviewWidget
+from sub_label_pos.services.preload import FilePreloadTask, PreloadResult, PreloadSignals
+from sub_label_pos.services.video_service import CachedVideoService, VideoService
+from sub_label_pos.model.types import StylePatch
+from sub_label_pos import shortcuts
+from sub_label_pos.ui.controllers.file_loader import FileLoader, VideoFilePair
+from sub_label_pos.ui.controllers.label_edit_controller import LabelEditController
+from sub_label_pos.ui.controllers.playback_orchestrator import PlaybackOrchestrator
+from sub_label_pos.ui.video_widget import VideoFrameWidget
+from sub_label_pos.ui.gallery_widget import GalleryPanel, LabelGroup, compute_label_groups, _crop_to_labels_image, _best_representative_time
+from sub_label_pos.ui.label_toolbar import LabelToolbar
+from sub_label_pos.ui.timeline_widget import TimelineWidget
 
 _VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".webm"}
 
@@ -75,59 +89,79 @@ class PreloadedFileData:
     thumbnails: dict[int, QImage] = field(default_factory=dict)
 
 
-class _FilePreloadSignals(QObject):
-    """Signals for a single file preload task (QRunnable can't have signals)."""
+class _RichPreloadSignals(QObject):
+    """Signals for a single rich-preload task (QRunnable can't host signals)."""
     file_ready = pyqtSignal(str, object)  # path, PreloadedFileData
     finished = pyqtSignal()
 
 
-class _FilePreloadTask(QRunnable):
-    """Processes a single video file on a QThreadPool thread."""
+class _RichFilePreloadTask(QRunnable):
+    """Composite preload task: metadata + first frame (via ``FilePreloadTask``),
+    then matching ASS lookup, label-group computation, and per-group thumbnails.
 
-    def __init__(self, path: str, cancelled: list[bool]):
+    All work runs on a QThreadPool thread; only Qt signal emission crosses
+    into the UI thread. Per-field failures are non-fatal — missing data
+    surfaces as ``None``/empty on the downstream ``PreloadedFileData``.
+    """
+
+    def __init__(self, path: str, video_service: VideoService) -> None:
         super().__init__()
-        self.signals = _FilePreloadSignals()
+        self.signals = _RichPreloadSignals()
         self._path = path
-        self._cancelled = cancelled
+        self._svc = video_service
+        self._cancelled = False
 
-    def run(self):
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
         try:
-            if self._cancelled[0]:
+            if self._cancelled:
                 return
 
-            fps = detect_fps(self._path)
-            if self._cancelled[0]:
-                return
-            dims = _get_video_dimensions(self._path)
-            if self._cancelled[0]:
-                return
-            duration = detect_duration(self._path)
-            if self._cancelled[0]:
-                return
-            initial_frame = extract_frame_as_image(self._path, 0)
-            if self._cancelled[0]:
-                return
+            video_path = Path(self._path)
 
-            # Find matching .ass file
-            video = Path(self._path)
+            # --- Metadata + first frame via the extracted FilePreloadTask ---
+            captured: list[PreloadResult] = []
+            inner_signals = PreloadSignals()
+            inner_signals.completed.connect(captured.append)
+            FilePreloadTask(video_path, self._svc, inner_signals).run()
+            if self._cancelled or not captured:
+                return
+            pr = captured[0]
+
+            # Fall back to safe defaults so downstream consumers don't have to
+            # special-case missing metadata (preserves pre-H7 behaviour).
+            fps = pr.fps if pr.fps is not None else 24.0
+            dims = pr.dimensions
+            duration = pr.duration if pr.duration is not None else 0.0
+            initial_frame = pr.first_frame
+
+            # --- Locate a matching .ass sidecar ---
             ass_file: AssFile | None = None
-            exact = video.with_suffix(".ass")
+            exact = video_path.with_suffix(".ass")
             if exact.is_file():
                 ass_file = AssFile(str(exact))
             else:
-                candidates = sorted(video.parent.glob(f"{glob.escape(video.stem)}.*.ass"))
+                candidates = sorted(
+                    video_path.parent.glob(f"{glob.escape(video_path.stem)}.*.ass")
+                )
                 if candidates:
                     ass_file = AssFile(str(candidates[0]))
 
+            # --- Label groups + per-group thumbnails ---
             groups: list[LabelGroup] = []
             thumbnails: dict[int, QImage] = {}
 
-            if ass_file and not self._cancelled[0]:
+            if ass_file and not self._cancelled:
                 groups = compute_label_groups(ass_file.labels)
                 for i, group in enumerate(groups):
-                    if self._cancelled[0]:
+                    if self._cancelled:
                         break
-                    img = extract_frame_as_image(self._path, group.representative_time)
+                    try:
+                        img = self._svc.get_frame(video_path, group.representative_time)
+                    except VideoServiceError:
+                        continue
                     if img and not img.isNull():
                         cropped = _crop_to_labels_image(
                             img, group,
@@ -138,7 +172,7 @@ class _FilePreloadTask(QRunnable):
                         )
                         thumbnails[i] = cropped
 
-            if not self._cancelled[0]:
+            if not self._cancelled:
                 data = PreloadedFileData(
                     fps=fps,
                     dims=dims,
@@ -160,22 +194,22 @@ class FolderPreloadWorker(QObject):
 
     _POOL_SIZE = 5
 
-    def __init__(self, file_paths: list[str]):
+    def __init__(self, file_paths: list[str], video_service: VideoService):
         super().__init__()
         self._file_paths = file_paths
-        self._cancelled: list[bool] = [False]
+        self._video_service = video_service
         self._pool = QThreadPool()
         self._pool.setMaxThreadCount(self._POOL_SIZE)
         self._total = len(file_paths)
         self._completed = 0
-        self._tasks: list[_FilePreloadTask] = []
+        self._tasks: list[_RichFilePreloadTask] = []
 
     def start(self):
         if not self._file_paths:
             self.all_done.emit()
             return
         for path in self._file_paths:
-            task = _FilePreloadTask(path, self._cancelled)
+            task = _RichFilePreloadTask(path, self._video_service)
             task.signals.file_ready.connect(self.file_ready)
             task.signals.finished.connect(self._on_task_finished)
             self._tasks.append(task)
@@ -187,7 +221,8 @@ class FolderPreloadWorker(QObject):
             self.all_done.emit()
 
     def cancel(self):
-        self._cancelled[0] = True
+        for task in self._tasks:
+            task.cancel()
         self._pool.clear()
         self._pool.waitForDone(3000)
 
@@ -339,6 +374,28 @@ class MainWindow(QMainWindow):
         self.resize(1280, 720)
         self.setAcceptDrops(True)
 
+        # Video service stack (frame extraction + LRU cache + async queue)
+        self._video_service: VideoService = CachedVideoService(
+            FFmpegVideoService(), FrameCache(max_size=64),
+        )
+        self._frame_queue = FrameRequestQueue(self._video_service, workers=2)
+
+        # FileLoader handles the "load one video + its sidecar ASS" primitive
+        # on a worker thread. MainWindow only orchestrates higher-level
+        # concerns (preload cache, mode switching, recent dirs) and reacts
+        # to the loaded/load_failed signals.
+        self._file_loader = FileLoader(self._video_service)
+        self._file_loader.loaded.connect(self._on_file_loaded)
+        self._file_loader.load_failed.connect(self._on_file_load_failed)
+
+        # Label store + derived groups (gallery and other store-aware widgets
+        # subscribe to these). MainWindow still keeps its own ``self._ass`` /
+        # ``self._groups`` for legacy paths — those will be retired as
+        # mutations move into store.apply() (tasks J3/J4/K1/L1).
+        self._store = LabelStore()
+        self._groups_model = DerivedGroupModel(self._store)
+        self._edit = LabelEditController(self._store)
+
         self._ass: AssFile | None = None
         self._groups: list[LabelGroup] = []
         self._group_index: int = -1
@@ -350,11 +407,15 @@ class MainWindow(QMainWindow):
         self._folder_files: list[str] = []
         self._folder_index: int = -1
         self._suppress_resize: bool = False
-        self._playback_mode: bool = False  # True = mpv playing, False = edit mode
+        # Edit/playback mode switching + mpv↔timeline sync lives in the
+        # orchestrator now (task K3). MainWindow still constructs the mpv
+        # widget and video stack — the orchestrator only owns the mode
+        # transitions and their side-effects.
+        self._playback = PlaybackOrchestrator()
 
-        # Async video setup
-        self._setup_thread: QThread | None = None
-        self._setup_worker: VideoSetupWorker | None = None
+        # Suppress-resize state lives here because FileLoader's loaded signal
+        # is fire-and-forget; the handler reads this flag to decide whether
+        # to centre/resize the window for the new video.
 
         # Folder pre-loading
         self._preloaded: dict[str, PreloadedFileData] = {}
@@ -405,15 +466,27 @@ class MainWindow(QMainWindow):
         _init_settings = QSettings("SubLabelPos", "SubLabelPos")
         self._mpv_widget._hwdec = _init_settings.value("mpv/hwdec", "auto-safe")
         self._mpv_widget._hq = _init_settings.value("mpv/high_quality", False, type=bool)
-        self._player = VideoFrameWidget()
-        self._gallery = GalleryPanel()
-        self._timeline = TimelineWidget()
+        self._player = VideoFrameWidget(self._store, self._video_service)
+        self._gallery = GalleryPanel(
+            store=self._store,
+            groups=self._groups_model,
+            video_service=self._video_service,
+        )
+        self._timeline = TimelineWidget(groups=self._groups_model)
 
         # Video stack: page 0 = mpv (playback), page 1 = editor (QPainter)
         self._video_stack = QStackedWidget()
         self._video_stack.addWidget(self._mpv_widget)   # index 0
         self._video_stack.addWidget(self._player)        # index 1
         self._video_stack.setCurrentIndex(1)  # start in edit mode
+
+        # Hand the orchestrator references to the widgets it needs to drive.
+        self._playback.attach_mpv_widget(self._mpv_widget)
+        self._playback.attach_editor_widget(self._player)
+        self._playback.attach_timeline_widget(self._timeline)
+        self._playback.attach_video_stack(self._video_stack)
+        self._playback.set_start_time_provider(self._playback_start_time)
+        self._playback.mode_changed.connect(self._on_playback_mode_changed)
 
         # Container for video stack + timeline (no splitter between them)
         video_container = QWidget()
@@ -436,8 +509,10 @@ class MainWindow(QMainWindow):
         self._stacked.addWidget(splitter)        # index 1
         self.setCentralWidget(self._stacked)
 
-        # Floating toolbar (child of player so it overlays the video)
-        self._toolbar = LabelToolbar(self._player)
+        # Floating toolbar (child of player so it overlays the video).
+        # The toolbar derives its display state from store signals; MainWindow
+        # only routes the user-driven button actions.
+        self._toolbar = LabelToolbar(self._store, parent=self._player)
 
         # Main toolbar
         self._main_tb = QToolBar("Main")
@@ -448,6 +523,31 @@ class MainWindow(QMainWindow):
         self._main_tb.addSeparator()
         self._main_tb.addAction("Open ASS", self._open_ass)
         self._main_tb.addAction("Save ASS", self._save_ass)
+
+        # Undo / redo actions (enabled state mirrors the store's UndoStack).
+        # Shortcut keys are not bound to the QAction here — global QShortcut
+        # objects below own the key bindings to avoid Qt's "ambiguous shortcut
+        # overload" warning. The shortcut text is shown in the tooltip only.
+        self._main_tb.addSeparator()
+        undo_action = QAction("Undo", self)
+        undo_action.setToolTip("Undo (" + shortcuts.UNDO.toString() + ")")
+        undo_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowBack))
+        undo_action.setEnabled(False)
+        undo_action.triggered.connect(self._edit.undo)
+
+        redo_action = QAction("Redo", self)
+        redo_action.setToolTip("Redo (" + shortcuts.REDO.toString() + ")")
+        redo_action.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowForward))
+        redo_action.setEnabled(False)
+        redo_action.triggered.connect(self._edit.redo)
+
+        self._undo_action = undo_action
+        self._redo_action = redo_action
+        self._main_tb.addAction(undo_action)
+        self._main_tb.addAction(redo_action)
+
+        self._store.undo_stack.can_undo_changed.connect(undo_action.setEnabled)
+        self._store.undo_stack.can_redo_changed.connect(redo_action.setEnabled)
 
         # mpv rendering controls
         self._main_tb.addSeparator()
@@ -480,31 +580,35 @@ class MainWindow(QMainWindow):
         self._main_tb.hide()
 
         # Shortcuts — frame stepping (arrow keys)
-        QShortcut(QKeySequence(Qt.Key.Key_Right), self, self._on_step_forward)
-        QShortcut(QKeySequence(Qt.Key.Key_Left), self, self._on_step_backward)
+        QShortcut(shortcuts.NEXT_FRAME, self, self._on_step_forward)
+        QShortcut(shortcuts.PREV_FRAME, self, self._on_step_backward)
         # Gallery navigation (Ctrl+arrow keys)
-        QShortcut(QKeySequence("Ctrl+Right"), self, lambda: self._goto_group(self._group_index + 1))
-        QShortcut(QKeySequence("Ctrl+Left"), self, lambda: self._goto_group(self._group_index - 1))
-        QShortcut(QKeySequence.StandardKey.Save, self, self._save_ass)
+        QShortcut(shortcuts.NEXT_GROUP, self, lambda: self._goto_group(self._group_index + 1))
+        QShortcut(shortcuts.PREV_GROUP, self, lambda: self._goto_group(self._group_index - 1))
+        QShortcut(shortcuts.SAVE, self, self._save_ass)
         # File navigation (Ctrl+Shift+arrow keys)
-        QShortcut(QKeySequence("Ctrl+Shift+Right"), self, self._next_file)
-        QShortcut(QKeySequence("Ctrl+Shift+Left"), self, self._prev_file)
+        QShortcut(shortcuts.NEXT_FILE, self, self._next_file)
+        QShortcut(shortcuts.PREV_FILE, self, self._prev_file)
         # Delete selected labels
-        QShortcut(QKeySequence(Qt.Key.Key_Delete), self, self._on_delete)
+        QShortcut(shortcuts.DELETE_SELECTED, self, self._on_delete)
         # Bold/Italic shortcuts
-        self._bold_shortcut = QShortcut(QKeySequence("Ctrl+B"), self, self._on_bold_shortcut)
-        self._italic_shortcut = QShortcut(QKeySequence("Ctrl+I"), self, self._on_italic_shortcut)
+        self._bold_shortcut = QShortcut(shortcuts.BOLD, self, self._on_bold_shortcut)
+        self._italic_shortcut = QShortcut(shortcuts.ITALIC, self, self._on_italic_shortcut)
         # Play/pause toggle
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, self._toggle_playback)
+        # Undo / redo — multiple bindings so Ctrl+Z, Ctrl+Y, and Ctrl+Shift+Z
+        # all work regardless of platform defaults.
+        QShortcut(shortcuts.UNDO, self, activated=self._edit.undo)
+        QShortcut(shortcuts.REDO, self, activated=self._edit.redo)
+        QShortcut(shortcuts.REDO_ALT_Y, self, activated=self._edit.redo)
+        QShortcut(shortcuts.REDO_ALT_SHIFT_Z, self, activated=self._edit.redo)
 
         # ── Connect signals ──
 
-        # Video widget signals
+        # Video widget signals.
         self._player.label_moved.connect(self._on_label_moved)
-        self._player.label_selected.connect(self._on_label_selected)
         self._player.label_resized.connect(self._on_label_resized)
         self._player.label_rotated.connect(self._on_label_rotated)
-        self._player.selection_cleared.connect(self._on_selection_cleared)
         self._player.edit_requested.connect(self._on_edit_requested)
         self._player.text_edited.connect(self._on_text_edited)
         self._player.editing_cancelled.connect(self._on_editing_cancelled)
@@ -513,9 +617,20 @@ class MainWindow(QMainWindow):
         self._player.drag_started.connect(self._on_drag_started)
         self._player.drag_finished.connect(self._on_drag_finished)
 
+        # Selection lives in the store. MainWindow listens for changes to
+        # reposition the floating toolbar and re-enable bold/italic
+        # shortcuts when the selection clears.
+        self._store.selection_changed.connect(self._on_store_selection_changed)
+
         # Gallery signals
         self._gallery.group_selected.connect(self._on_group_selected)
         self._gallery.group_right_clicked.connect(self._on_gallery_context_menu)
+
+        # Keep the legacy ``self._groups`` mirror in sync with the model.
+        # MainWindow still indexes into ``self._groups`` from many places
+        # (_goto_group, _delete_group, _group_index_for_label, etc.); routing
+        # all of those through the model is L1's job, not J2's.
+        self._groups_model.groups_changed.connect(self._on_model_groups_changed)
 
         # Toolbar signals
         self._toolbar.duplicate_clicked.connect(self._on_duplicate)
@@ -540,10 +655,11 @@ class MainWindow(QMainWindow):
         self._timeline.group_clicked.connect(self._goto_group)
 
         # mpv signals
-        self._mpv_widget.time_pos_changed.connect(self._on_mpv_time_pos)
+        # Mpv-driven timeline + mode sync is owned by PlaybackOrchestrator.
+        self._mpv_widget.time_pos_changed.connect(self._playback.on_mpv_time_pos)
         self._mpv_widget.duration_changed.connect(self._on_mpv_duration)
         self._mpv_widget.pause_changed.connect(self._on_mpv_pause_changed)
-        self._mpv_widget.eof_reached.connect(self._on_mpv_eof)
+        self._mpv_widget.eof_reached.connect(self._playback.on_mpv_eof)
 
         # Welcome screen signals
         self._welcome.open_video_clicked.connect(self._open_video)
@@ -621,69 +737,95 @@ class MainWindow(QMainWindow):
             self._load_video(path)
 
     def _load_video(self, path: str, suppress_resize: bool = False) -> None:
-        self._cancel_video_setup()
+        """Begin loading a video. Synchronous UI setup happens here; the
+        metadata + sidecar fetch is delegated to FileLoader, which fires
+        ``_on_file_loaded`` once the bundle is ready.
+        """
         self._video_path = path
         self._suppress_resize = suppress_resize
         self._player.set_video(path)
         self._mpv_widget.load(path)
         # Ensure we're in edit mode when loading a new video
-        self._playback_mode = False
-        self._video_stack.setCurrentIndex(1)
-        self._timeline.set_playing(False)
+        self._playback.set_video_loaded(True)
+        self._playback.reset_to_edit()
         _status_msg(self, "Loading...", 0)
 
-        # Start async video setup
-        self._setup_worker = VideoSetupWorker(path)
-        self._setup_thread = QThread()
-        self._setup_worker.moveToThread(self._setup_thread)
-        self._setup_thread.started.connect(self._setup_worker.run)
-        self._setup_worker.finished.connect(self._on_video_setup_done)
-        self._setup_worker.finished.connect(self._setup_thread.quit)
-        self._setup_thread.start()
+        # Hand off the metadata probe + sidecar lookup to FileLoader.
+        self._file_loader.load_video(Path(path))
 
-    def _on_video_setup_done(self, fps: float, dims: object, frame: object, duration: float = 0.0) -> None:
-        self._player.set_fps(fps)
-        if duration > 0:
-            self._timeline.set_duration(duration)
+    def _on_file_loaded(self, pair: VideoFilePair) -> None:
+        """Apply a FileLoader result: metadata to player/timeline, then
+        auto-load the sidecar ASS if present.
+        """
+        # If the user has navigated to a different file since this load
+        # started, the result is stale — ignore it.
+        if self._video_path != str(pair.video_path):
+            return
 
-        if isinstance(frame, QImage) and not frame.isNull():
-            self._player.show_frame_from_image(frame)
+        if pair.fps is not None:
+            self._player.set_fps(pair.fps)
+        if pair.duration is not None and pair.duration > 0:
+            self._timeline.set_duration(pair.duration)
 
-        if not self._suppress_resize and dims is not None:
-            vid_w, vid_h = dims
-            screen_obj = self.screen()
-            if screen_obj:
-                screen = screen_obj.availableGeometry()
-                max_w = int(screen.width() * 0.7)
-                target_w = min(vid_w, max_w)
-                aspect = vid_h / vid_w
-                target_h = int(target_w * aspect) + 160  # gallery height
-                target_h = min(target_h, int(screen.height() * 0.85))
-                self.resize(target_w, target_h)
-                x = screen.x() + (screen.width() - target_w) // 2
-                y = screen.y() + (screen.height() - target_h) // 2
-                self.move(x, y)
+        if (not self._suppress_resize
+                and pair.width is not None and pair.height is not None):
+            self._apply_window_size_for_video(pair.width, pair.height)
 
-        # Auto-load matching .ass
-        video = Path(self._video_path) if self._video_path else None
-        if video:
-            exact = video.with_suffix(".ass")
-            if exact.is_file():
-                self._load_ass(str(exact))
-            else:
-                candidates = sorted(video.parent.glob(f"{glob.escape(video.stem)}.*.ass"))
-                if candidates:
-                    self._load_ass(str(candidates[0]))
+        # Auto-load matching .ass (FileLoader already parsed it).
+        if pair.ass is not None and pair.ass_path is not None:
+            self._apply_loaded_ass(pair.ass, str(pair.ass_path))
 
         self._update_window_title()
         _status_msg(self, f"Loaded: {self._video_path}")
 
-    def _cancel_video_setup(self) -> None:
-        if self._setup_thread and self._setup_thread.isRunning():
-            self._setup_thread.quit()
-            self._setup_thread.wait(2000)
-        self._setup_worker = None
-        self._setup_thread = None
+    def _on_file_load_failed(self, path: object, err: str) -> None:
+        QMessageBox.critical(
+            self, "Load Failed",
+            f"Failed to load video:\n{path}\n\n{err}",
+        )
+        _status_msg(self, f"Load failed: {path}")
+
+    def _apply_window_size_for_video(self, vid_w: int, vid_h: int) -> None:
+        screen_obj = self.screen()
+        if not screen_obj:
+            return
+        screen = screen_obj.availableGeometry()
+        max_w = int(screen.width() * 0.7)
+        target_w = min(vid_w, max_w)
+        aspect = vid_h / vid_w
+        target_h = int(target_w * aspect) + 160  # gallery height
+        target_h = min(target_h, int(screen.height() * 0.85))
+        self.resize(target_w, target_h)
+        x = screen.x() + (screen.width() - target_w) // 2
+        y = screen.y() + (screen.height() - target_h) // 2
+        self.move(x, y)
+
+    def _apply_loaded_ass(self, ass: AssFile, path: str) -> None:
+        """Install an already-parsed AssFile as the current document.
+
+        Used by both ``_load_ass`` (Open ASS dialog) and ``_on_file_loaded``
+        (FileLoader sidecar discovery). All wiring -- player.set_ass, mpv
+        subtitle load, store load + gallery refresh, initial group navigation
+        -- lives here.
+        """
+        self._ass = ass
+        self._ass_path = path
+        self._dirty = False
+        self._player.set_ass(self._ass)
+        self._mpv_widget.load_subtitles(path)
+        self._playback.set_subtitles_path(path)
+        self._toolbar.hide()
+        _status_msg(self, f"Loaded {len(self._ass.labels)} labels from {path}")
+
+        if self._video_path:
+            self._gallery.attach_video(self._video_path)
+            self._store_load_current_ass()
+            if self._groups:
+                self._goto_group(0)
+        else:
+            self._groups = []
+            self._group_index = -1
+            self._player.show_time(self._player._current_time)
 
     # ── Folder loading ──
 
@@ -790,7 +932,7 @@ class MainWindow(QMainWindow):
     # ── Folder pre-loading ──
 
     def _start_folder_preload(self, file_paths: list[str]) -> None:
-        self._preload_worker = FolderPreloadWorker(file_paths)
+        self._preload_worker = FolderPreloadWorker(file_paths, self._video_service)
         self._preload_worker.file_ready.connect(self._on_file_preloaded)
         self._preload_worker.all_done.connect(self._on_preload_done)
         self._preload_worker.start()
@@ -819,15 +961,13 @@ class MainWindow(QMainWindow):
     def _load_video_from_cache(self, path: str, data: PreloadedFileData,
                                suppress_resize: bool) -> None:
         """Load a video file using pre-loaded data (near-instant)."""
-        self._cancel_video_setup()
         self._video_path = path
         self._player.set_video(path)
         self._player.set_fps(data.fps)
         self._mpv_widget.load(path)
         # Ensure edit mode
-        self._playback_mode = False
-        self._video_stack.setCurrentIndex(1)
-        self._timeline.set_playing(False)
+        self._playback.set_video_loaded(True)
+        self._playback.reset_to_edit()
         if data.duration > 0:
             self._timeline.set_duration(data.duration)
 
@@ -850,25 +990,25 @@ class MainWindow(QMainWindow):
                 self.move(x, y)
 
         if data.ass:
-            self._ass = data.ass
-            self._ass_path = data.ass.path
-            self._dirty = False
-            self._player.set_ass(self._ass)
-            self._mpv_widget.load_subtitles(data.ass.path)
-            self._toolbar.hide()
-            self._gallery.set_data_preloaded(
-                path, data.ass, data.groups, data.thumbnails,
+            # _apply_loaded_ass handles all the player/mpv/store wiring.
+            # We then seed the pre-rendered thumbnails so the gallery skips
+            # extracting them itself, and refire groups_changed so the
+            # gallery picks them up.
+            self._apply_loaded_ass(data.ass, data.ass.path)
+            self._gallery.cache_preloaded_thumbnails(
+                data.ass, self._groups_model.groups, data.thumbnails,
             )
-            self._groups = self._gallery.groups
-            self._timeline.set_groups(self._groups)
-            if self._groups:
-                self._goto_group(0)
+            self._groups_model.groups_changed.emit(set())
         else:
             self._ass = None
             self._ass_path = None
             self._groups = []
             self._group_index = -1
-            self._gallery.clear()
+            # Reset the gallery (signal-driven). Calling LabelStore.load with
+            # an empty AssFile would be the "proper" way, but we don't want to
+            # touch the store's source_path. Trigger a transient file_loaded.
+            self._gallery._on_file_loaded(None)
+            self._groups_model.groups_changed.emit(set())
 
         self._update_window_title()
         _status_msg(self, f"Loaded: {path}")
@@ -878,36 +1018,45 @@ class MainWindow(QMainWindow):
             self, "Open ASS", "", "ASS Subtitles (*.ass);;All (*)"
         )
         if path:
-            self._load_ass(path)
-
-    def _load_ass(self, path: str) -> None:
-        self._ass = AssFile(path)
-        self._ass_path = path
-        self._dirty = False
-        self._player.set_ass(self._ass)
-        self._mpv_widget.load_subtitles(path)
-        self._toolbar.hide()
-        _status_msg(self, f"Loaded {len(self._ass.labels)} labels from {path}")
-
-        if self._video_path:
-            self._rebuild_gallery()
-            self._timeline.set_groups(self._groups)
-            if self._groups:
-                self._goto_group(0)
-        else:
-            self._groups = []
-            self._group_index = -1
-            self._player.show_time(self._player._current_time)
+            self._apply_loaded_ass(AssFile(path), path)
 
     def _save_ass(self) -> None:
-        if not self._ass:
+        """Save by reconstructing the .ass from the store's state snapshot.
+
+        The on-disk file is rewritten from ``LabelState`` (so the store is
+        the source of truth at save time). The previous AssFile's header
+        (Script Info + V4+ Styles) is preserved so any hand-edited script
+        info / style raw fields survive the round-trip; only the [Events]
+        section is regenerated from the state.
+        """
+        if not self._ass or not self._ass_path:
             _status_msg(self, "No ASS file loaded")
             return
-        self._ass.save()
+        path = Path(self._ass_path)
+        try:
+            header = self._ass.lines[:self._ass.events_start_index]
+            rebuilt = AssFile.from_state(
+                self._store.state,
+                header_lines=header,
+                play_res_x=self._ass.play_res_x,
+                play_res_y=self._ass.play_res_y,
+            )
+            path.write_bytes(rebuilt.serialize())
+        except OSError as e:
+            QMessageBox.critical(self, "Save Failed", str(e))
+            return
+        # Keep the in-memory AssFile in sync with what's on disk so subsequent
+        # saves base their header on the freshly written file (and so any
+        # code still reading ass.labels / ass.lines sees current values).
+        rebuilt.path = str(path)
+        self._ass = rebuilt
+        self._player.set_ass(self._ass)
+        self._gallery.attach_ass(self._ass)
+        self._store.mark_clean()
         self._dirty = False
         self._mpv_widget.reload_subtitles()
         self._repopulate_cache()
-        _status_msg(self, f"Saved: {self._ass.path}")
+        _status_msg(self, f"Saved: {path}")
 
     def _repopulate_cache(self) -> None:
         """Rebuild the preload cache entry from current live state."""
@@ -927,14 +1076,36 @@ class MainWindow(QMainWindow):
             thumbnails=thumbnails,
         )
 
-    # ── Gallery ──
+    # ── Store/Gallery bridge (J2) ──
+    #
+    # During the refactor MainWindow still owns ``self._ass`` and mutates it
+    # directly. The store needs to know about those mutations so the
+    # DerivedGroupModel and Gallery can refresh. These helpers are bridges
+    # that will disappear once mutations route through ``store.apply()``
+    # (tasks J3/J4/K1).
 
-    def _rebuild_gallery(self) -> None:
-        """Full gallery rebuild. Only used on initial ASS load."""
-        if self._video_path and self._ass:
-            self._gallery.set_data(self._video_path, self._ass)
-            self._groups = self._gallery.groups
-            self._timeline.set_groups(self._groups)
+    def _store_load_current_ass(self) -> None:
+        """Push the active ASS file into the store; save serializes from state.
+
+        The gallery still keeps its own AssFile reference (for thumbnail
+        rendering / per-style metadata it doesn't get from the store), so
+        re-attach it after ``file_loaded`` clears the gallery's ref.
+        """
+        if self._ass is None or not self._ass_path:
+            return
+        self._store.load(self._ass, Path(self._ass_path))
+        self._gallery.attach_ass(self._ass)
+
+    def _on_model_groups_changed(self, _changed_ids) -> None:
+        """Re-sync legacy ``self._groups`` mirror from the gallery's adapter
+        list (which itself is built from the model). The timeline subscribes
+        to the same signal directly, so no manual refresh needed here."""
+        self._groups = self._gallery.groups
+        # Clamp current group index.
+        if self._group_index >= len(self._groups):
+            self._group_index = len(self._groups) - 1
+        elif self._group_index < 0 and self._groups:
+            self._group_index = -1  # leave unselected; goto called elsewhere
 
     def _group_index_for_label(self, label: LabelDialogue) -> int:
         """Find which group a label belongs to, or -1."""
@@ -950,12 +1121,11 @@ class MainWindow(QMainWindow):
         self._group_index = index
         self._playback_from_group = True
         group = self._groups[index]
-        # If in playback mode, pause and enter edit mode
-        if self._playback_mode:
-            self._mpv_widget.pause()
-            self._playback_mode = False
-            self._video_stack.setCurrentIndex(1)
-            self._timeline.set_playing(False)
+        # If in playback mode, snap back to edit mode (without capturing
+        # mpv's current frame — the group's representative time will be
+        # rendered from ffmpeg instead).
+        if self._playback.is_playback:
+            self._playback.enter_edit_mode(capture=False)
         self._player.show_time(group.representative_time)
         self._player.prefetch_around(group.representative_time)
         self._gallery.select_group(index)
@@ -967,11 +1137,8 @@ class MainWindow(QMainWindow):
         if 0 <= index < len(self._groups):
             t = self._groups[index].representative_time
             # If in playback mode, switch to edit mode
-            if self._playback_mode:
-                self._mpv_widget.pause()
-                self._playback_mode = False
-                self._video_stack.setCurrentIndex(1)
-                self._timeline.set_playing(False)
+            if self._playback.is_playback:
+                self._playback.enter_edit_mode(capture=False)
             self._player.show_time(t)
             self._player.prefetch_around(t)
             self._timeline.set_time(t)
@@ -1007,89 +1174,52 @@ class MainWindow(QMainWindow):
 
     # ── Label interaction ──
 
+    def _on_store_selection_changed(self, selected_ids: set) -> None:
+        """Reposition the toolbar above the new selection (or re-enable
+        bold/italic shortcuts when the selection clears).
+
+        The toolbar's display state is managed by LabelToolbar itself via
+        its own subscription to ``store.selection_changed``; here we just
+        handle the side-effects MainWindow owns (toolbar geometry +
+        shortcut enabled state).
+        """
+        if selected_ids:
+            self._update_toolbar_position()
+        else:
+            self._bold_shortcut.setEnabled(True)
+            self._italic_shortcut.setEnabled(True)
+
     def _on_label_moved(self, label: LabelDialogue, new_x: int, new_y: int) -> None:
-        if self._ass:
-            self._ass.set_label_position(label, new_x, new_y)
+        if self._ass and label.label_id:
+            self._edit.move(label.label_id, new_x, new_y)
             self._dirty = True
             _status_msg(self, f"Moved \"{label.text}\" to ({new_x}, {new_y})")
         self._update_toolbar_position()
 
     def _on_label_resized(self, label, new_fs):
+        if not label.label_id:
+            return
+        # The legacy video_widget has already updated ``label.font_size`` in
+        # place during the resize drag; route through the controller so the
+        # store sees the final size and ass.lines is rewritten.
+        self._edit.resize(label.label_id, new_fs)
         self._dirty = True
-        self._toolbar._font_size = new_fs
-        self._toolbar._size_label.setText(str(new_fs))
 
     def _on_label_rotated(self, label, rotation):
+        if not label.label_id:
+            return
+        self._edit.rotate(label.label_id, rotation)
         self._dirty = True
-
-    def _on_label_selected(self, label: LabelDialogue) -> None:
-        selected = self._player.selected_labels()
-        multi = len(selected) > 1
-        if label.font_size is not None:
-            font_size = label.font_size
-        elif self._ass:
-            style = self._ass.styles.get(label.style_name)
-            font_size = style.font_size if style else self._ass.label_font_size
-        else:
-            font_size = 36
-        if multi:
-            alignments = {lb.alignment for lb in selected}
-            effective_alignment = alignments.pop() if len(alignments) == 1 else None
-        else:
-            effective_alignment = label.alignment
-
-        # Determine bold/italic state
-        if self._ass:
-            style = self._ass.styles.get(label.style_name)
-            default_bold = style.bold if style else self._ass.label_bold
-            default_italic = style.italic if style else self._ass.label_italic
-        else:
-            default_bold = False
-            default_italic = False
-        bold = label.bold if label.bold is not None else default_bold
-        italic = label.italic if label.italic is not None else default_italic
-
-        # Determine colour/outline state
-        if self._ass:
-            style = self._ass.styles.get(label.style_name)
-            primary_colour = label.primary_colour if label.primary_colour is not None else (
-                style.primary_colour if style else "&H00FFFFFF&"
-            )
-            outline_colour = label.outline_colour if label.outline_colour is not None else (
-                style.outline_colour if style else "&H00000000&"
-            )
-            outline_width = label.outline_width if label.outline_width is not None else (
-                style.outline_width if style else 2.0
-            )
-        else:
-            primary_colour = "&H00FFFFFF&"
-            outline_colour = "&H00000000&"
-            outline_width = 2.0
-
-        available_styles = list(self._ass.styles.keys()) if self._ass else []
-
-        self._toolbar.set_multi_mode(multi)
-        self._toolbar.show_for_label(
-            font_size, effective_alignment,
-            bold=bold, italic=italic,
-            style_name=label.style_name,
-            available_styles=available_styles,
-            primary_colour=primary_colour,
-            outline_colour=outline_colour,
-            outline_width=outline_width,
-        )
-        self._update_toolbar_position()
-
-    def _on_selection_cleared(self) -> None:
-        self._toolbar.hide()
-        self._bold_shortcut.setEnabled(True)
-        self._italic_shortcut.setEnabled(True)
 
     def _on_drag_started(self) -> None:
         self._toolbar.hide()
 
     def _on_drag_finished(self) -> None:
-        self._refresh_toolbar_for_selection()
+        # Toolbar self-syncs from labels_mutated; re-show it (selection is
+        # unchanged so it stayed in sync). Then position it above the label.
+        if self._player.selected_labels():
+            self._toolbar.show()
+            self._update_toolbar_position()
 
     def _update_toolbar_position(self) -> None:
         """Position toolbar above the first selected label's rect."""
@@ -1110,12 +1240,9 @@ class MainWindow(QMainWindow):
         if not selected:
             return
         label = selected[0]
-        new_label = self._ass.duplicate_label(label)
-        # Add to same group (same time range)
-        gi = self._group_index_for_label(label)
-        if gi >= 0:
-            self._groups[gi].labels.append(new_label)
-            self._gallery.refresh_thumbnail(gi)
+        if not label.label_id:
+            return
+        self._edit.duplicate(label.label_id)
         self._player.show_time(self._player._current_time)
         self._dirty = True
         _status_msg(self, f"Duplicated \"{label.text}\"")
@@ -1125,8 +1252,8 @@ class MainWindow(QMainWindow):
             return
         start = min(lb.start_time for lb in labels)
         end = max(lb.end_time for lb in labels)
-        for lb in labels:
-            self._ass.set_label_times(lb, start, end)
+        ids = [lb.label_id for lb in labels if lb.label_id]
+        self._edit.retime_many(ids, start, end)
         self._dirty = True
         self._player.show_time(self._player._current_time)
         _status_msg(self, f"Synced {len(labels)} labels to {_seconds_to_time(start)} \u2192 {_seconds_to_time(end)}")
@@ -1145,20 +1272,19 @@ class MainWindow(QMainWindow):
         self._player.clear_selection()
         # Find affected group before deleting
         gi = self._group_index_for_label(selected[0])
-        # Remove from ASS
-        self._ass.delete_labels(selected)
-        # Update the group
+        removed_ids = {lb.label_id for lb in selected if lb.label_id}
+        # Controller submits DeleteLabel(s) and mirrors onto AssFile.
+        # The labels_removed signal triggers gallery + groups rebuild +
+        # self._on_model_groups_changed which refreshes self._groups.
+        self._edit.delete(removed_ids)
+        # Navigate to a sensible group after the rebuild.
         if gi >= 0:
-            group = self._groups[gi]
-            for lb in selected:
-                if lb in group.labels:
-                    group.labels.remove(lb)
-            if not group.labels:
-                self._remove_group_and_advance(gi)
+            if not self._groups:
+                self._group_index = -1
+                self._player.show_time(self._player._current_time)
             else:
-                group.representative_time = _best_representative_time(group.labels)
-                self._gallery.refresh_thumbnail(gi)
-                self._goto_group(gi)
+                next_gi = min(gi, len(self._groups) - 1)
+                self._goto_group(next_gi)
         else:
             self._player.show_time(self._player._current_time)
         count = len(selected)
@@ -1173,15 +1299,14 @@ class MainWindow(QMainWindow):
         self._player.clear_selection()
         group = self._groups[gi]
         count = len(group.labels)
-        self._ass.delete_labels(list(group.labels))
-        group.labels.clear()
-        self._remove_group_and_advance(gi)
+        removed_ids = {lb.label_id for lb in group.labels if lb.label_id}
+        self._edit.delete(removed_ids)
+        self._advance_after_group_removal(gi)
         self._dirty = True
         _status_msg(self, f"Deleted {count} label{'s' if count > 1 else ''}")
 
-    def _remove_group_and_advance(self, gi: int) -> None:
-        """Remove an empty group from the gallery and navigate to the next one."""
-        self._gallery.remove_group(gi)
+    def _advance_after_group_removal(self, gi: int) -> None:
+        """Pick a sensible group to navigate to after one was removed."""
         if not self._groups:
             self._group_index = -1
             self._player.show_time(self._player._current_time)
@@ -1193,8 +1318,9 @@ class MainWindow(QMainWindow):
     def _on_font_size_changed(self, size: int) -> None:
         if not self._ass:
             return
-        for label in self._player.selected_labels():
-            self._ass.set_label_font_size(label, size)
+        selected = list(self._player.selected_labels())
+        ids = {lb.label_id for lb in selected if lb.label_id}
+        self._edit.change_style_many(ids, StylePatch(font_size=size))
         self._dirty = True
         self._player.update()
 
@@ -1204,13 +1330,18 @@ class MainWindow(QMainWindow):
         selected = self._player.selected_labels()
         if not selected:
             return
+        # Compute new positions per label before submitting (geometry depends
+        # on current font/rect). Submit alignment change then position move
+        # for each label.
         for label in selected:
+            if not label.label_id:
+                continue
             font = self._player._font_for_label(label)
             rect = self._player._compute_rect(label, font)
             new_anchor = _anchor_for_alignment(rect, new_alignment)
             new_x, new_y = self._player._widget_to_ass(new_anchor.x(), new_anchor.y())
-            self._ass.set_label_alignment(label, new_alignment)
-            self._ass.set_label_position(label, new_x, new_y)
+            self._edit.change_style(label.label_id, StylePatch(alignment=new_alignment))
+            self._edit.move(label.label_id, new_x, new_y)
         self._dirty = True
         self._player.update()
         self._update_toolbar_position()
@@ -1250,42 +1381,50 @@ class MainWindow(QMainWindow):
         if not self._ass or self._style_clipboard is None:
             return
         clip = self._style_clipboard
-        font_size = clip["font_size"]
-        alignment = clip["alignment"]
-        bold = clip["bold"]
-        italic = clip["italic"]
+        # Build a StylePatch for the patch-compatible fields. style_name and
+        # position are handled separately via dedicated controller methods.
+        patch = StylePatch(
+            font_size=clip["font_size"],
+            primary_colour=clip["primary_colour"],
+            outline_colour=clip["outline_colour"],
+            outline_width=clip["outline_width"],
+            bold=clip["bold"],
+            italic=clip["italic"],
+            rotation=clip["rotation"],
+            # alignment is handled below (it requires a recomputed position).
+        )
         style_name = clip["style"]
-        primary_colour = clip["primary_colour"]
-        outline_colour = clip["outline_colour"]
-        outline_width = clip["outline_width"]
-        rotation = clip["rotation"]
         position = clip["position"]
-        for label in self._player.selected_labels():
-            if bold is not None:
-                self._ass.set_label_bold(label, bold)
-            if italic is not None:
-                self._ass.set_label_italic(label, italic)
-            if primary_colour is not None:
-                self._ass.set_label_primary_colour(label, primary_colour)
-            if outline_colour is not None:
-                self._ass.set_label_outline_colour(label, outline_colour)
-            if outline_width is not None:
-                self._ass.set_label_outline_width(label, outline_width)
-            if rotation is not None:
-                self._ass.set_label_rotation(label, rotation)
-            if style_name and style_name in self._ass.styles:
-                self._ass.set_label_style(label, style_name)
-            if font_size is not None:
-                self._ass.set_label_font_size(label, font_size)
-            if position is not None:
-                self._ass.set_label_position(label, position[0], position[1])
-            if alignment is not None:
+        alignment = clip["alignment"]
+        selected_for_paste = list(self._player.selected_labels())
+        ids = {lb.label_id for lb in selected_for_paste if lb.label_id}
+        # Apply the bulk StylePatch fields as one batch.
+        if ids and any(
+            getattr(patch, f) is not None
+            for f in ("font_size", "primary_colour", "outline_colour",
+                      "outline_width", "bold", "italic", "rotation")
+        ):
+            self._edit.change_style_many(ids, patch)
+        # Named-style change is not a StylePatch field; route via the
+        # controller's dedicated helper.
+        if style_name and style_name in self._ass.styles:
+            for lid in ids:
+                self._edit.change_style_name(lid, style_name)
+        # Position paste.
+        if position is not None:
+            for lid in ids:
+                self._edit.move(lid, position[0], position[1])
+        # Alignment paste also moves the label to keep its visual anchor.
+        if alignment is not None:
+            for label in selected_for_paste:
+                if not label.label_id:
+                    continue
                 font = self._player._font_for_label(label)
                 rect = self._player._compute_rect(label, font)
                 new_anchor = _anchor_for_alignment(rect, alignment)
                 new_x, new_y = self._player._widget_to_ass(new_anchor.x(), new_anchor.y())
-                self._ass.set_label_alignment(label, alignment)
-                self._ass.set_label_position(label, new_x, new_y)
+                self._edit.change_style(label.label_id, StylePatch(alignment=alignment))
+                self._edit.move(label.label_id, new_x, new_y)
         self._dirty = True
         self._player._font_corrections.clear()
         self._player.update()
@@ -1296,8 +1435,8 @@ class MainWindow(QMainWindow):
     def _on_bold_toggled(self, bold: bool) -> None:
         if not self._ass:
             return
-        for label in self._player.selected_labels():
-            self._ass.set_label_bold(label, bold)
+        ids = {lb.label_id for lb in self._player.selected_labels() if lb.label_id}
+        self._edit.change_style_many(ids, StylePatch(bold=bold))
         self._dirty = True
         self._player.update()
         self._update_toolbar_position()
@@ -1305,8 +1444,8 @@ class MainWindow(QMainWindow):
     def _on_italic_toggled(self, italic: bool) -> None:
         if not self._ass:
             return
-        for label in self._player.selected_labels():
-            self._ass.set_label_italic(label, italic)
+        ids = {lb.label_id for lb in self._player.selected_labels() if lb.label_id}
+        self._edit.change_style_many(ids, StylePatch(italic=italic))
         self._dirty = True
         self._player.update()
         self._update_toolbar_position()
@@ -1314,8 +1453,9 @@ class MainWindow(QMainWindow):
     def _on_style_changed(self, style_name: str) -> None:
         if not self._ass or style_name not in self._ass.styles:
             return
-        for label in self._player.selected_labels():
-            self._ass.set_label_style(label, style_name)
+        for label in list(self._player.selected_labels()):
+            if label.label_id:
+                self._edit.change_style_name(label.label_id, style_name)
         self._dirty = True
         self._player._font_corrections.clear()
         self._player.update()
@@ -1324,24 +1464,24 @@ class MainWindow(QMainWindow):
     def _on_primary_colour_changed(self, colour: str) -> None:
         if not self._ass:
             return
-        for label in self._player.selected_labels():
-            self._ass.set_label_primary_colour(label, colour)
+        ids = {lb.label_id for lb in self._player.selected_labels() if lb.label_id}
+        self._edit.change_style_many(ids, StylePatch(primary_colour=colour))
         self._dirty = True
         self._player.update()
 
     def _on_outline_colour_changed(self, colour: str) -> None:
         if not self._ass:
             return
-        for label in self._player.selected_labels():
-            self._ass.set_label_outline_colour(label, colour)
+        ids = {lb.label_id for lb in self._player.selected_labels() if lb.label_id}
+        self._edit.change_style_many(ids, StylePatch(outline_colour=colour))
         self._dirty = True
         self._player.update()
 
     def _on_outline_width_changed(self, width: float) -> None:
         if not self._ass:
             return
-        for label in self._player.selected_labels():
-            self._ass.set_label_outline_width(label, width)
+        ids = {lb.label_id for lb in self._player.selected_labels() if lb.label_id}
+        self._edit.change_style_many(ids, StylePatch(outline_width=width))
         self._dirty = True
         self._player.update()
 
@@ -1359,6 +1499,10 @@ class MainWindow(QMainWindow):
         elif self._ass.styles:
             template = next(iter(self._ass.styles.values()))
         new_style = self._ass.add_style(name, template)
+        # Mirror into the store's state.styles so toolbar lookups + save
+        # serialization see the new style (state.styles is a shallow copy of
+        # ass.styles at load time, so adds don't propagate automatically).
+        self._store.state.styles[name] = new_style
         # Apply label's inline overrides into the new style
         if selected:
             label = selected[0]
@@ -1387,6 +1531,11 @@ class MainWindow(QMainWindow):
                     self._ass.remove_inline_tag(label, tag_re, attr)
             # Assign label to the new style
             self._ass.set_label_style(label, name)
+            # set_label_style + remove_inline_tag mutated the LabelDialogue
+            # in place; emit labels_mutated so the toolbar / video widget /
+            # gallery refresh.
+            if label.label_id:
+                self._store.labels_mutated.emit({label.label_id})
         self._dirty = True
         self._player.update()
         self._refresh_toolbar_for_selection()
@@ -1452,16 +1601,28 @@ class MainWindow(QMainWindow):
             self._ass.update_style_field(style_name, field_idx, field_value)
             self._ass.remove_inline_tag_from_all(style_name, tag_re, attr_name)
 
+        # remove_inline_tag_from_all mutated all labels using the style in
+        # place. Notify subscribers so the toolbar / video widget refresh.
+        affected = {
+            lid for lid, dlg in self._store.state.labels.items()
+            if dlg.style_name == style_name
+        }
+        if affected:
+            self._store.labels_mutated.emit(affected)
         self._dirty = True
         self._player.update()
         self._refresh_toolbar_for_selection()
         _status_msg(self, f"Applied overrides to style '{style_name}'")
 
     def _refresh_toolbar_for_selection(self) -> None:
-        """Re-read the selected label state and update the toolbar."""
-        selected = self._player.selected_labels()
-        if selected:
-            self._on_label_selected(selected[0])
+        """Reposition the toolbar above the current selection.
+
+        Display state is auto-updated by the toolbar from ``labels_mutated``.
+        Callers invoke this after edits that may have changed the label rect
+        (font size / style swap / paste) so the toolbar follows the new rect.
+        """
+        if self._player.selected_labels():
+            self._update_toolbar_position()
 
     def _on_bold_shortcut(self) -> None:
         # If inline editor is active, let QTextEdit handle Ctrl+B
@@ -1479,12 +1640,9 @@ class MainWindow(QMainWindow):
 
         any_bold = any(_is_bold(lb) for lb in selected)
         new_bold = not any_bold
-        for lb in selected:
-            self._ass.set_label_bold(lb, new_bold)
+        ids = {lb.label_id for lb in selected if lb.label_id}
+        self._edit.change_style_many(ids, StylePatch(bold=new_bold))
         self._dirty = True
-        self._toolbar._bold_btn.blockSignals(True)
-        self._toolbar._bold_btn.setChecked(new_bold)
-        self._toolbar._bold_btn.blockSignals(False)
         self._player.update()
         self._update_toolbar_position()
 
@@ -1503,12 +1661,9 @@ class MainWindow(QMainWindow):
 
         any_italic = any(_is_italic(lb) for lb in selected)
         new_italic = not any_italic
-        for lb in selected:
-            self._ass.set_label_italic(lb, new_italic)
+        ids = {lb.label_id for lb in selected if lb.label_id}
+        self._edit.change_style_many(ids, StylePatch(italic=new_italic))
         self._dirty = True
-        self._toolbar._italic_btn.blockSignals(True)
-        self._toolbar._italic_btn.setChecked(new_italic)
-        self._toolbar._italic_btn.blockSignals(False)
         self._player.update()
         self._update_toolbar_position()
 
@@ -1527,16 +1682,15 @@ class MainWindow(QMainWindow):
     def _on_text_edited(self, label: LabelDialogue, rich_text: str) -> None:
         self._bold_shortcut.setEnabled(True)
         self._italic_shortcut.setEnabled(True)
-        if not self._ass:
+        if not self._ass or not label.label_id:
             return
-        self._ass.set_label_rich_text(label, rich_text)
+        # The display text is rich_text minus inline override blocks; compute
+        # it here so the controller submits both text and rich_text atomically.
+        from sub_label_pos.model.ass_file import _OVERRIDE_BLOCK_RE
+        display_text = _OVERRIDE_BLOCK_RE.sub("", rich_text).strip()
+        self._edit.edit_text(label.label_id, display_text, rich_text)
         self._dirty = True
         self._player.show_time(self._player._current_time)
-        # Update just the text on the affected thumbnail
-        gi = self._group_index_for_label(label)
-        if gi >= 0 and gi < len(self._gallery._thumbnails):
-            texts = [lb.text for lb in self._groups[gi].labels]
-            self._gallery._thumbnails[gi].update_texts(texts)
         _status_msg(self, f"Updated text to \"{label.text}\"")
 
     # ── Context menus ──
@@ -1596,18 +1750,16 @@ class MainWindow(QMainWindow):
         self._toolbar.hide()
         self._player.clear_selection()
         gi = self._group_index_for_label(labels[0])
-        new_label = self._ass.merge_labels(labels, order, separator)
-        if gi >= 0:
-            group = self._groups[gi]
-            for lb in labels:
-                if lb in group.labels:
-                    group.labels.remove(lb)
-            group.labels.append(new_label)
-            group.representative_time = _best_representative_time(group.labels)
-            self._gallery.refresh_thumbnail(gi)
+        ids = [lb.label_id for lb in labels if lb.label_id]
+        merged_id = self._edit.merge(ids, order, separator)
+        if merged_id is None:
+            return
+        merged_dlg = self._store.state.labels.get(merged_id)
+        if gi >= 0 and 0 <= gi < len(self._groups):
             self._goto_group(gi)
         self._dirty = True
-        _status_msg(self, f"Merged {len(labels)} labels into \"{new_label.text[:30]}\"")
+        preview = (merged_dlg.text[:30] if merged_dlg else "")
+        _status_msg(self, f"Merged {len(labels)} labels into \"{preview}\"")
 
     def _on_empty_context_menu(self, pos: QPointF) -> None:
         menu = QMenu(self)
@@ -1624,29 +1776,17 @@ class MainWindow(QMainWindow):
         # Default: 2 second duration centered on current time
         start_time = max(0.0, current_time - 1.0)
         end_time = current_time + 1.0
-        new_label = self._ass.add_label(
-            pos_x=ass_x,
-            pos_y=ass_y,
-            start_time=start_time,
-            end_time=end_time,
+        new_id = self._edit.create_label(
+            pos_x=ass_x, pos_y=ass_y,
+            start_time=start_time, end_time=end_time,
             text="New Label",
             font_size=self._ass.label_font_size,
         )
-        # Add to current group only if time ranges overlap, otherwise rebuild
-        gi = self._group_index
-        added_to_current = False
-        if 0 <= gi < len(self._groups):
-            group = self._groups[gi]
-            if group.labels:
-                group_start = min(lb.start_time for lb in group.labels)
-                group_end = max(lb.end_time for lb in group.labels)
-                if start_time <= group_end and end_time >= group_start:
-                    group.labels.append(new_label)
-                    group.representative_time = _best_representative_time(group.labels)
-                    self._gallery.refresh_thumbnail(gi)
-                    added_to_current = True
-        if not added_to_current:
-            self._rebuild_gallery()
+        if new_id is None:
+            return
+        # Locate the freshly added label via the store for group navigation.
+        new_label = self._store.state.labels.get(new_id)
+        if new_label is not None:
             new_gi = self._group_index_for_label(new_label)
             if new_gi >= 0:
                 self._goto_group(new_gi)
@@ -1669,67 +1809,15 @@ class MainWindow(QMainWindow):
                 return min(lb.start_time for lb in group.labels)
         return self._player._current_time
 
-    def _enter_playback_mode(self) -> None:
-        """Switch to mpv playback mode."""
-        if self._playback_mode:
-            return
-        if not self._video_path:
-            return
-        self._playback_mode = True
-        self._toolbar.hide()
-        # Switch to mpv widget (triggers initializeGL on first use)
-        self._video_stack.setCurrentIndex(0)
+    def _on_playback_mode_changed(self, mode: str) -> None:
+        """React to orchestrator mode changes for UI side-effects.
 
-        if self._mpv_widget.is_file_loaded:
-            start = self._playback_start_time()
-            self._mpv_widget.seek_absolute(start)
-            self._mpv_widget.play()
-        else:
-            # File not yet loaded — wait for file_loaded signal
-            self._mpv_widget.file_loaded.connect(
-                self._on_mpv_file_loaded_for_playback,
-                Qt.ConnectionType.SingleShotConnection,
-            )
-        self._timeline.set_playing(True)
-
-    def _on_mpv_file_loaded_for_playback(self) -> None:
-        """Called when mpv finishes loading a file and we want to start playback."""
-        if self._playback_mode:
-            start = self._playback_start_time()
-            self._mpv_widget.seek_absolute(start)
-            self._mpv_widget.play()
-            # Also load subtitles if we have them
-            if self._ass_path:
-                self._mpv_widget.load_subtitles(self._ass_path)
-
-    def _enter_edit_mode(self, capture: bool = True) -> None:
-        """Switch to QPainter edit mode, optionally capturing mpv's current frame."""
-        if not self._playback_mode:
-            return
-        self._mpv_widget.pause()
-        self._playback_mode = False
-
-        time_pos = self._mpv_widget.time_pos
-
-        # Set _current_time BEFORE show_frame_from_image so the captured frame
-        # is cached under the mpv pause time, not the previous representative time.
-        self._player._current_time = time_pos
-
-        if capture:
-            frame_data = self._mpv_widget.capture_frame()
-            if frame_data:
-                rgb_bytes, w, h = frame_data
-                img = QImage(rgb_bytes, w, h, w * 3, QImage.Format.Format_RGB888)
-                # QImage doesn't copy the data, so .copy() ensures it's owned
-                img = img.copy()
-                self._player.show_frame_from_image(img)
-        self._player._update_visible_labels(time_pos)
-        self._player._update_scaled_pixmap()
-        self._player.update()
-
-        self._video_stack.setCurrentIndex(1)
-        self._timeline.set_playing(False)
-        self._timeline.set_time(time_pos)
+        The orchestrator handles the heavy lifting (stack switch, mpv
+        play/pause, timeline state); MainWindow only handles things tied
+        to widgets it owns directly, e.g. hiding the floating toolbar.
+        """
+        if mode == "playback":
+            self._toolbar.hide()
 
     def _toggle_playback(self) -> None:
         """Toggle between playback and edit modes (Space bar)."""
@@ -1738,38 +1826,31 @@ class MainWindow(QMainWindow):
             return
         if not self._video_path:
             return
-        if self._playback_mode:
-            self._enter_edit_mode()
-        else:
-            self._enter_playback_mode()
+        self._playback.toggle()
 
     def _on_play_toggled(self, playing: bool) -> None:
         """Handle play/pause button from timeline widget."""
         if playing:
-            self._enter_playback_mode()
+            self._playback.enter_playback_mode()
         else:
-            self._enter_edit_mode()
+            self._playback.enter_edit_mode()
 
     def _on_timeline_seeked(self, seconds: float) -> None:
         """Handle scrubber drag from timeline."""
         self._playback_from_group = False
-        if self._playback_mode:
-            # Pause and enter edit mode at the seeked position
-            self._mpv_widget.pause()
-            self._playback_mode = False
+        if self._playback.is_playback:
+            # Drop back to edit mode (without capturing mpv's frame — we
+            # are about to seek), then point mpv at the new position so a
+            # subsequent play resumes from there.
+            self._playback.enter_edit_mode(capture=False)
             self._mpv_widget.seek_absolute(seconds)
-            self._video_stack.setCurrentIndex(1)
-            self._timeline.set_playing(False)
-            # Use ffmpeg to extract the frame in edit mode
-            self._player.show_time(seconds)
-        else:
-            self._player.show_time(seconds)
+        self._player.show_time(seconds)
 
     def _on_timeline_step(self, delta: int) -> None:
         """Handle frame step buttons from timeline."""
         self._playback_from_group = False
-        if self._playback_mode:
-            self._enter_edit_mode()
+        if self._playback.is_playback:
+            self._playback.enter_edit_mode()
         if delta > 0:
             self._player.step_frame(1)
         else:
@@ -1779,7 +1860,7 @@ class MainWindow(QMainWindow):
     def _on_step_forward(self) -> None:
         """Arrow right — frame step in current mode."""
         self._playback_from_group = False
-        if self._playback_mode:
+        if self._playback.is_playback:
             self._mpv_widget.frame_step(forward=True)
         else:
             self._player.step_frame(1)
@@ -1788,16 +1869,11 @@ class MainWindow(QMainWindow):
     def _on_step_backward(self) -> None:
         """Arrow left — frame step in current mode."""
         self._playback_from_group = False
-        if self._playback_mode:
+        if self._playback.is_playback:
             self._mpv_widget.frame_step(forward=False)
         else:
             self._player.step_frame(-1)
             self._timeline.set_time(self._player._current_time)
-
-    def _on_mpv_time_pos(self, seconds: float) -> None:
-        """Sync timeline with mpv playback position."""
-        if self._playback_mode:
-            self._timeline.set_time(seconds)
 
     def _on_mpv_duration(self, duration: float) -> None:
         """Update timeline when mpv reports video duration."""
@@ -1806,11 +1882,6 @@ class MainWindow(QMainWindow):
     def _on_mpv_pause_changed(self, paused: bool) -> None:
         """Handle mpv pause state changes."""
         self._timeline.set_playing(not paused)
-
-    def _on_mpv_eof(self) -> None:
-        """Handle end-of-file — switch to edit mode."""
-        if self._playback_mode:
-            self._enter_edit_mode(capture=False)
 
     # ── mpv rendering settings ──
 
@@ -1842,9 +1913,10 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
         self._cancel_folder_preload()
-        self._cancel_video_setup()
+        self._file_loader.shutdown()
         self._gallery._cancel_loading()
         self._gallery._cancel_single_refresh()
         self._mpv_widget.shutdown()
         self._player.shutdown()
+        self._frame_queue.shutdown()
         super().closeEvent(event)
