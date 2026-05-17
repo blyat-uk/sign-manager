@@ -336,6 +336,10 @@ class VideoFrameWidget(QWidget):
         self._loading_debounce.setInterval(250)
         self._loading_debounce.timeout.connect(self._show_loading_pill)
 
+        # Drag chip: floating cursor-coordinate readout shown during move drags.
+        self._drag_chip = _theme.DragChip(parent=self)
+        self._drag_press_pos: "QPoint | None" = None  # widget-px position where drag started
+
     def set_ass(self, ass: AssFile | None):
         self._ass = ass
         self._font_corrections.clear()
@@ -585,6 +589,20 @@ class VideoFrameWidget(QWidget):
             self.width() - self._loading_pill.width() - margin,
             self.height() - self._loading_pill.height() - margin,
         )
+
+    def _anchor_drag_chip(self, cursor) -> None:
+        """Position drag chip at cursor + (20,20), flipping if it would overflow."""
+        self._drag_chip.adjustSize()
+        chip_w = self._drag_chip.width()
+        chip_h = self._drag_chip.height()
+        offset = 20
+        x = cursor.x() + offset
+        y = cursor.y() + offset
+        if x + chip_w > self.width():
+            x = cursor.x() - chip_w - offset
+        if y + chip_h > self.height():
+            y = cursor.y() - chip_h - offset
+        self._drag_chip.move(max(0, x), max(0, y))
 
     def _update_scaled_pixmap(self):
         # Frame pixmap is about to change. Any in-flight drag layer has the
@@ -1225,6 +1243,23 @@ class VideoFrameWidget(QWidget):
                 painter.setPen(pen)
                 painter.drawLine(p1, p2)
 
+        # Hover outline (Task 17) — drawn last so it sits on top of label paint.
+        # Hidden when the hovered label is part of the active selection (the
+        # selection draw already provides a stronger blue outline).
+        if self._hovered_label is not None:
+            hovered_id = getattr(self._hovered_label, "line_index", None)
+            selected_ids = {
+                self._store.state.labels[lid].line_index
+                for lid in self._store.selected
+                if lid in self._store.state.labels
+            }
+            if hovered_id is not None and hovered_id not in selected_ids:
+                rect = self._label_rects.get(hovered_id)
+                if rect is not None:
+                    painter.setPen(QPen(QColor(255, 255, 255, 217), 1.5))
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawRect(rect)
+
         painter.end()
 
     def resizeEvent(self, event):
@@ -1293,6 +1328,8 @@ class VideoFrameWidget(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            # Stash drag press position in widget pixels for the drag chip readout (Task 17)
+            self._drag_press_pos = event.position().toPoint()
             pos = event.position()
             # Check handles first (resize/rotate)
             handle_hit = self._hit_test_handles(pos)
@@ -1365,6 +1402,16 @@ class VideoFrameWidget(QWidget):
         # Active move drag in progress
         if self._drag_started and self._dragging:
             self._do_drag_move(pos)
+            # Update drag-chip readout (Task 17)
+            if self._drag_press_pos is not None:
+                from PyQt6.QtCore import QPoint
+                cur = pos.toPoint()
+                dx = cur.x() - self._drag_press_pos.x()
+                dy = cur.y() - self._drag_press_pos.y()
+                self._drag_chip.update_position(cur.x(), cur.y(), dx, dy)
+                self._drag_chip.set_snap_target(None)
+                self._anchor_drag_chip(cur)
+                self._drag_chip.show()
             event.accept()
             return
 
@@ -1416,6 +1463,9 @@ class VideoFrameWidget(QWidget):
             self._drag_mode = _DragMode.NONE
             self._handle_label = None
             self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            # Hide drag-chip on release (Task 17)
+            self._drag_chip.hide()
+            self._drag_press_pos = None
             event.accept()
             return
         super().mouseReleaseEvent(event)
