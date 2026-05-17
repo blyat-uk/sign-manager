@@ -53,8 +53,11 @@ class SettingsDialog(QDialog):
         self._gallery_cb.setChecked(self._settings.display.gallery_visible)
         self._sidebar_cb = QCheckBox("Show file sidebar (folder mode)")
         self._sidebar_cb.setChecked(self._settings.display.sidebar_visible)
+        self._labels_sidebar_cb = QCheckBox("Show labels list (right)")
+        self._labels_sidebar_cb.setChecked(self._settings.display.labels_sidebar_visible)
         display_form.addRow(self._gallery_cb)
         display_form.addRow(self._sidebar_cb)
+        display_form.addRow(self._labels_sidebar_cb)
         layout.addWidget(display_box)
 
         # --- Playback ---
@@ -141,6 +144,7 @@ class SettingsDialog(QDialog):
         # Mutate the settings object the caller passed in, then persist.
         self._settings.display.gallery_visible = self._gallery_cb.isChecked()
         self._settings.display.sidebar_visible = self._sidebar_cb.isChecked()
+        self._settings.display.labels_sidebar_visible = self._labels_sidebar_cb.isChecked()
 
         new_tier = self.selected_tier()
         tier_changed = new_tier != self._initial_tier
