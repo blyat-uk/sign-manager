@@ -818,6 +818,7 @@ class MainWindow(QMainWindow):
         _status_msg(self, f"Loaded {len(self._ass.labels)} labels from {path}")
 
         if self._video_path:
+            self._gallery.attach_ass(self._ass)
             self._gallery.attach_video(self._video_path)
             self._store_load_current_ass()
             if self._groups:
