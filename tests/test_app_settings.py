@@ -70,3 +70,12 @@ def test_legacy_settings_file_without_display_block(tmp_path: Path):
     # Gallery follows perf.gallery_enabled when display block absent
     assert loaded.display.gallery_visible is False
     assert loaded.display.sidebar_visible is True
+
+
+def test_settings_dialog_constructs(qapp):
+    from sub_label_pos.ui.settings_dialog import SettingsDialog
+    s = AppSettings()  # defaults
+    d = SettingsDialog(s)
+    assert d.windowTitle() == "Preferences"
+    d.set_initial_hwdec("vaapi")
+    assert d.selected_hwdec() == "vaapi"
