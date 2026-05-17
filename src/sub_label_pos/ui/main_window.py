@@ -688,7 +688,17 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.addWidget(video_container)
-        splitter.addWidget(self._gallery)
+        from PyQt6.QtWidgets import QWidget as _Widget, QVBoxLayout as _VBox
+        from sub_label_pos.ui.gallery_widget import GalleryHandle
+        gallery_container = _Widget()
+        gallery_layout = _VBox(gallery_container)
+        gallery_layout.setContentsMargins(0, 0, 0, 0)
+        gallery_layout.setSpacing(0)
+        self._gallery_handle = GalleryHandle()
+        self._gallery_handle.toggled.connect(self._on_gallery_handle_toggled)
+        gallery_layout.addWidget(self._gallery_handle)
+        gallery_layout.addWidget(self._gallery)
+        splitter.addWidget(gallery_container)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
 
@@ -2369,6 +2379,16 @@ class MainWindow(QMainWindow):
         except Exception:
             log.exception("Failed to persist mpv_quality setting")
 
+    def _on_gallery_handle_toggled(self, expanded: bool) -> None:
+        self._gallery.setVisible(expanded)
+        self._app_settings.display.gallery_visible = expanded
+        from sub_label_pos.services.app_settings import save_display
+        save_display(self._app_settings.display)
+        if hasattr(self, "_gallery_btn") and self._gallery_btn.isChecked() != expanded:
+            self._gallery_btn.blockSignals(True)
+            self._gallery_btn.setChecked(expanded)
+            self._gallery_btn.blockSignals(False)
+
     def _on_show_gallery_toggled(self, checked: bool) -> None:
         """Legacy slot — delegates to the new _on_gallery_toggled."""
         self._on_gallery_toggled(checked)
@@ -2389,6 +2409,8 @@ class MainWindow(QMainWindow):
             self._gallery_btn.blockSignals(True)
             self._gallery_btn.setChecked(visible)
             self._gallery_btn.blockSignals(False)
+        if hasattr(self, "_gallery_handle") and self._gallery_handle._expanded != visible:
+            self._gallery_handle.set_expanded(visible)
 
     def _on_sidebar_toggled(self, visible: bool) -> None:
         """Toggle the file sidebar dock visibility and persist the choice."""

@@ -23,6 +23,7 @@ from sub_label_pos.model.groups import LabelGroup as ModelLabelGroup
 from sub_label_pos.model.label_store import LabelStore
 from sub_label_pos.services.exceptions import VideoServiceError
 from sub_label_pos.services.video_service import VideoService
+from sub_label_pos.ui import theme
 
 log = logging.getLogger(__name__)
 
@@ -377,6 +378,74 @@ class SingleThumbnailWorker(QObject):
         self.finished.emit()
 
 
+class GalleryHandle(QWidget):
+    """Thin 24px strip above the gallery; click to toggle collapse."""
+
+    toggled = pyqtSignal(bool)  # emits new "expanded" state
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from PyQt6.QtCore import QSize
+        self.setFixedHeight(24)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet(
+            f"GalleryHandle {{ background: {theme.Tokens.bg_base}; "
+            f"border-top: 1px solid {theme.Tokens.bg_hover}; }}"
+            f"GalleryHandle:hover {{ background: {theme.Tokens.bg_surface}; }}"
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 0, 12, 0)
+        layout.setSpacing(8)
+
+        self._chev = QLabel()
+        self._chev.setPixmap(theme.Icons.caret_down().pixmap(QSize(11, 11)))
+        self._title = QLabel("LABEL GROUPS")
+        self._title.setStyleSheet(
+            f"color: {theme.Tokens.text_muted}; font-size: 10.5px; "
+            f"letter-spacing: 0.6px; font-weight: 700; background: transparent;"
+        )
+        self._count = QLabel("· 0 groups · 0 labels")
+        self._count.setStyleSheet(
+            f"color: {theme.Tokens.border_strong}; font-size: 10.5px; "
+            f"background: transparent;"
+        )
+        self._kb = QLabel("G to toggle")
+        self._kb.setStyleSheet(
+            f"color: {theme.Tokens.border_strong}; font-size: 9.5px; "
+            f"font-family: ui-monospace, monospace; background: transparent;"
+        )
+
+        layout.addWidget(self._chev)
+        layout.addWidget(self._title)
+        layout.addWidget(self._count)
+        layout.addStretch()
+        layout.addWidget(self._kb)
+
+        self._expanded = True
+
+    def set_counts(self, n_groups: int, n_labels: int) -> None:
+        self._count.setText(f"· {n_groups} groups · {n_labels} labels")
+
+    def set_expanded(self, expanded: bool) -> None:
+        if self._expanded == expanded:
+            return
+        self._expanded = expanded
+        from PyQt6.QtCore import QSize
+        from PyQt6.QtGui import QTransform
+        rotated = theme.Icons.caret_down().pixmap(QSize(11, 11)).transformed(
+            QTransform().rotate(0 if expanded else -90)
+        )
+        self._chev.setPixmap(rotated)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.set_expanded(not self._expanded)
+            self.toggled.emit(self._expanded)
+        super().mousePressEvent(event)
+
+
 class GalleryThumbnail(QWidget):
     clicked = pyqtSignal(int)
     right_clicked = pyqtSignal(int)
@@ -385,6 +454,7 @@ class GalleryThumbnail(QWidget):
         super().__init__(parent)
         self._index = index
         self._selected = False
+        self._modified = False
 
         self.setFixedWidth(_THUMB_W)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
@@ -398,7 +468,9 @@ class GalleryThumbnail(QWidget):
         self._image_label.setFixedSize(_THUMB_W - 8, _THUMB_IMG_H)
         self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._image_label.setStyleSheet(
-            "background: #2a2a2a; color: #888; font-size: 11px;"
+            f"background: {theme.Tokens.bg_surface}; "
+            f"color: {theme.Tokens.border_strong}; "
+            f"font-size: 11px; border-radius: 4px;"
         )
         self._image_label.setText("Loading...")
         layout.addWidget(self._image_label)
@@ -408,13 +480,19 @@ class GalleryThumbnail(QWidget):
             combined = combined[:22] + "..."
         self._text_label = QLabel(combined)
         self._text_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._text_label.setStyleSheet("color: #ccc; font-size: 10px;")
+        self._text_label.setStyleSheet(
+            f"color: {theme.Tokens.text_primary}; "
+            f"font-size: 11.5px; font-weight: 500; background: transparent;"
+        )
         self._text_label.setWordWrap(False)
         layout.addWidget(self._text_label)
 
         self._time_label = QLabel(time_str)
         self._time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._time_label.setStyleSheet("color: #888; font-size: 9px;")
+        self._time_label.setStyleSheet(
+            f"color: {theme.Tokens.text_muted}; "
+            f"font-size: 10px; background: transparent;"
+        )
         layout.addWidget(self._time_label)
 
     def update_texts(self, label_texts: list[str]) -> None:
@@ -437,7 +515,14 @@ class GalleryThumbnail(QWidget):
             self._selected = selected
             self.update()
 
+    def set_modified(self, modified: bool) -> None:
+        if self._modified == modified:
+            return
+        self._modified = modified
+        self.update()
+
     def paintEvent(self, event):
+        super().paintEvent(event)
         if self._selected:
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -446,7 +531,16 @@ class GalleryThumbnail(QWidget):
             painter.setBrush(QColor(26, 26, 46, 80))
             painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 4, 4)
             painter.end()
-        super().paintEvent(event)
+        if self._modified:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setPen(QPen(QColor(theme.Tokens.bg_deepest), 2))
+            p.setBrush(QColor(theme.Tokens.alert))
+            # 8x8 dot near top-right of the image area
+            x = self.width() - 12
+            y = 10
+            p.drawEllipse(x, y, 8, 8)
+            p.end()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
