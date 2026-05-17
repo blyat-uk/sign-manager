@@ -569,3 +569,67 @@ class ColorSwatch(QPushButton):
 
     def color(self) -> QColor | None:
         return self._color
+
+
+class StatusChip(QWidget):
+    """Pill-shaped status bar entry with icon prefix + text. Supports 'alert' variant."""
+
+    def __init__(self, icon=None, text: str = "", *, alert: bool = False, parent=None):
+        super().__init__(parent)
+        self._icon_label = QLabel()
+        self._text_label = QLabel(text)
+        self._alert = alert
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 0, 10, 0)
+        layout.setSpacing(5)
+        layout.addWidget(self._icon_label)
+        layout.addWidget(self._text_label)
+
+        if icon is not None:
+            self._icon_label.setPixmap(icon.pixmap(QSize(12, 12)))
+
+        self.setFixedHeight(26)
+        self._apply_style()
+
+    def _apply_style(self):
+        bg = Tokens.bg_deepest
+        text = Tokens.text_muted if not self._alert else Tokens.alert
+        border = Tokens.border if not self._alert else "#5a4622"
+        self.setStyleSheet(
+            f"StatusChip {{ background: {bg}; border: 1px solid {border}; "
+            f"border-radius: {Tokens.r_pill}px; }}"
+            f"QLabel {{ color: {text}; font-size: 11px; background: transparent; }}"
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+    def set_text(self, text: str) -> None:
+        self._text_label.setText(text)
+
+    def set_alert(self, alert: bool) -> None:
+        if self._alert == alert:
+            return
+        self._alert = alert
+        self._apply_style()
+
+
+class StyleChip(QPushButton):
+    """Left-side chip on the label toolbar: '[tag] Caption ▾'. Click opens style menu."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setIcon(Icons.style_tag(color=Tokens.accent))
+        self.setIconSize(QSize(11, 11))
+        self.setText("Style ▾")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setFixedHeight(26)
+        self.setStyleSheet(
+            "QPushButton { background: #1a3a5a; color: #b8d4f0; "
+            "border: 1px solid #2a5a8a; border-radius: 4px; padding: 0 10px; "
+            "font-size: 11.5px; font-weight: 500; text-align: left; }"
+            "QPushButton:hover { background: #234a72; color: #fff; }"
+        )
+
+    def set_style_name(self, name: str) -> None:
+        self.setText(f"{name} ▾")

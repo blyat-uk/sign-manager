@@ -109,3 +109,16 @@ def test_color_swatch_mixed(qapp):
     assert sw.color().name() == "#ff0000"
     sw.set_color(None)
     assert sw.color() is None
+
+
+def test_status_chip_alert_variant(qapp):
+    chip = theme.StatusChip(theme.Icons.files(), "3 / 12")
+    assert chip._alert is False
+    chip.set_alert(True)
+    assert chip._alert is True
+
+
+def test_style_chip_renames(qapp):
+    chip = theme.StyleChip()
+    chip.set_style_name("Caption")
+    assert chip.text() == "Caption ▾"
