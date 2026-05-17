@@ -126,12 +126,23 @@ class _RichFilePreloadTask(QRunnable):
     surfaces as ``None``/empty on the downstream ``PreloadedFileData``.
     """
 
-    def __init__(self, path: str, video_service: VideoService) -> None:
+    def __init__(
+        self,
+        path: str,
+        video_service: VideoService,
+        *,
+        generate_thumbnails: bool = True,
+    ) -> None:
         super().__init__()
         self.signals = _RichPreloadSignals()
         self._path = path
         self._svc = video_service
         self._cancelled = False
+        # When False, skip per-group thumbnail extraction entirely. Saves
+        # significant RAM on Performance-tier machines when the gallery is
+        # hidden — preloaded QImage thumbnails would otherwise be retained
+        # in MainWindow._preloaded for the lifetime of the folder.
+        self._gen_thumbs = generate_thumbnails
 
     def cancel(self) -> None:
         self._cancelled = True
@@ -177,22 +188,25 @@ class _RichFilePreloadTask(QRunnable):
 
             if ass_file and not self._cancelled:
                 groups = compute_label_groups(ass_file.labels)
-                for i, group in enumerate(groups):
-                    if self._cancelled:
-                        break
-                    try:
-                        img = self._svc.get_frame(video_path, group.representative_time)
-                    except VideoServiceError:
-                        continue
-                    if img and not img.isNull():
-                        cropped = _crop_to_labels_image(
-                            img, group,
-                            ass_file.play_res_x, ass_file.play_res_y,
-                            ass_file.label_font_name, ass_file.label_font_size,
-                            ass_file.label_alignment,
-                            styles=dict(ass_file.styles),
-                        )
-                        thumbnails[i] = cropped
+                if self._gen_thumbs:
+                    for i, group in enumerate(groups):
+                        if self._cancelled:
+                            break
+                        try:
+                            img = self._svc.get_frame(
+                                video_path, group.representative_time
+                            )
+                        except VideoServiceError:
+                            continue
+                        if img and not img.isNull():
+                            cropped = _crop_to_labels_image(
+                                img, group,
+                                ass_file.play_res_x, ass_file.play_res_y,
+                                ass_file.label_font_name, ass_file.label_font_size,
+                                ass_file.label_alignment,
+                                styles=dict(ass_file.styles),
+                            )
+                            thumbnails[i] = cropped
 
             if not self._cancelled:
                 data = PreloadedFileData(
@@ -234,6 +248,7 @@ class FolderPreloadWorker(QObject):
         video_service: VideoService,
         workers: int | None = None,
         ring: int = 0,
+        generate_thumbnails: bool = True,
     ):
         super().__init__()
         self._file_paths = file_paths
@@ -247,6 +262,7 @@ class FolderPreloadWorker(QObject):
         self._active_index = 0
         self._queued: set[int] = set()
         self._started = False
+        self._gen_thumbs = generate_thumbnails
 
     def _compute_ring_indices(self, active: int) -> set[int]:
         """Return the set of file indices that should be preloaded for ``active``.
@@ -274,7 +290,10 @@ class FolderPreloadWorker(QObject):
         )
         for i in new:
             path = self._file_paths[i]
-            task = _RichFilePreloadTask(path, self._video_service)
+            task = _RichFilePreloadTask(
+                path, self._video_service,
+                generate_thumbnails=self._gen_thumbs,
+            )
             task.signals.file_ready.connect(self.file_ready)
             task.signals.finished.connect(self._on_task_finished)
             self._tasks.append(task)
@@ -1341,6 +1360,7 @@ class MainWindow(QMainWindow):
             self._video_service,
             workers=self._app_settings.perf.preload_workers,
             ring=self._app_settings.perf.preload_ring,
+            generate_thumbnails=self._should_generate_gallery(),
         )
         # Centre the ring on the currently-active file in the sidebar so
         # the first file the user opens gets preloaded first, ahead of
