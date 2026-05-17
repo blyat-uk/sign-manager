@@ -492,7 +492,12 @@ class MainWindow(QMainWindow):
         _init_settings = QSettings("SubLabelPos", "SubLabelPos")
         self._mpv_widget._hwdec = _init_settings.value("mpv/hwdec", "auto-safe")
         self._mpv_widget._hq = _init_settings.value("mpv/high_quality", False, type=bool)
-        self._player = VideoFrameWidget(self._store, self._video_service)
+        self._player = VideoFrameWidget(
+            self._store,
+            self._video_service,
+            frame_queue=self._frame_queue,
+            frame_cache_size=perf.frame_cache_size,
+        )
         self._gallery = GalleryPanel(
             store=self._store,
             groups=self._groups_model,

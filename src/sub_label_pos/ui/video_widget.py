@@ -31,13 +31,21 @@ from sub_label_pos.model.ass_file import (
 from sub_label_pos.model.label_store import LabelStore
 from sub_label_pos.model.types import LabelId
 from sub_label_pos.services.exceptions import VideoServiceError
+from sub_label_pos.services.frame_request_queue import FrameRequestQueue
 from sub_label_pos.services.video_service import VideoService
 from sub_label_pos.ui.label_toolbar import ass_colour_to_qcolor
 
 log = logging.getLogger(__name__)
 
 
+# Default in-widget pixmap cache size; the actual cap is set per-instance via
+# the constructor's ``frame_cache_size`` (driven from
+# ``settings.perf.frame_cache_size``). Kept as a module-level constant so call
+# sites and tests have a stable documented default.
 _CACHE_MAX = 50
+_TARGET_RESIZE_ROUND = 256  # round widget extraction target up to this multiple
+_TARGET_MIN = 480
+_TARGET_DEFAULT = 1280      # used when the widget has no laid-out size yet
 _DRAG_THRESHOLD = 4  # pixels before press becomes drag
 _HANDLE_SIZE = 8        # px, side length of corner resize squares
 _HANDLE_HIT_RADIUS = 10  # px, hit test tolerance for handles
@@ -141,7 +149,15 @@ class VideoFrameWidget(QWidget):
     drag_started = pyqtSignal()   # emitted when move or rotate drag begins
     drag_finished = pyqtSignal()  # emitted when move or rotate drag ends
 
-    def __init__(self, store: LabelStore, video_service: VideoService, parent=None):
+    def __init__(
+        self,
+        store: LabelStore,
+        video_service: VideoService,
+        parent=None,
+        *,
+        frame_queue: FrameRequestQueue | None = None,
+        frame_cache_size: int = _CACHE_MAX,
+    ):
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setStyleSheet("background: #1e1e1e;")
@@ -149,6 +165,26 @@ class VideoFrameWidget(QWidget):
 
         self._store = store
         self._video_service = video_service
+        # Async frame extraction queue: cache-miss seeks dispatch here rather
+        # than blocking the UI on a synchronous ffmpeg subprocess. Optional
+        # for backwards compat with constructors that haven't been migrated
+        # yet -- when None, show_time falls back to the synchronous path.
+        self._frame_queue: FrameRequestQueue | None = frame_queue
+        if frame_queue is not None:
+            frame_queue.frame_ready.connect(self._on_async_frame_ready)
+            frame_queue.frame_failed.connect(self._on_async_frame_failed)
+        # Sequence number of the most recent in-flight frame request; results
+        # whose seq doesn't match this value are stale (user has scrubbed
+        # elsewhere) and are dropped.
+        self._pending_seek_seq: int = 0
+        # Per-instance LRU cap on the pixmap cache. Driven from
+        # settings.perf.frame_cache_size in MainWindow so 4K pixmaps don't
+        # explode resident memory on low-end machines.
+        self._cache_max: int = max(1, int(frame_cache_size))
+        # Target max-dimension for editor frame extraction. Recomputed on
+        # resize; passed to get_frame so ffmpeg downscales server-side rather
+        # than transporting native pixels through Qt.
+        self._target_max_dim: int = _TARGET_DEFAULT
         self._video_path: str | None = None
         self._ass: AssFile | None = None
         self._font_corrections: dict[tuple[str, bool, bool], float] = {}
@@ -308,7 +344,7 @@ class VideoFrameWidget(QWidget):
         self._pixmap = pm
         cs_key = int(round(self._current_time * 100))
         self._cache[cs_key] = pm
-        if len(self._cache) > _CACHE_MAX:
+        while len(self._cache) > self._cache_max:
             self._cache.popitem(last=False)
         self._update_scaled_pixmap()
         self.update()
@@ -320,7 +356,20 @@ class VideoFrameWidget(QWidget):
         self.show_time(self._current_time)
 
     def show_time(self, seconds: float):
-        """Extract and display the frame at the given time."""
+        """Display the frame at the given time.
+
+        On cache hit, the pixmap is shown immediately.
+
+        On cache miss, the previous pixmap is left on screen (so the canvas
+        doesn't blank) and an async request is dispatched to the
+        ``FrameRequestQueue`` if one was injected; the result arrives later
+        via ``_on_async_frame_ready``. Only the most-recent request's seq
+        number is honoured -- stale results are dropped, so rapid scrubbing
+        always lands on the latest target frame.
+
+        If no ``frame_queue`` was injected (legacy callers / tests), the
+        synchronous ``_extract_frame`` fallback runs inline as before.
+        """
         self._current_time = seconds
         self._update_visible_labels(seconds)
 
@@ -331,13 +380,29 @@ class VideoFrameWidget(QWidget):
         if cs_key in self._cache:
             self._cache.move_to_end(cs_key)
             self._pixmap = self._cache[cs_key]
-        else:
-            pixmap = self._extract_frame(seconds)
-            if pixmap and not pixmap.isNull():
-                self._pixmap = pixmap
-                self._cache[cs_key] = pixmap
-                if len(self._cache) > _CACHE_MAX:
-                    self._cache.popitem(last=False)
+            self._update_scaled_pixmap()
+            self.update()
+            return
+
+        # Cache miss.
+        if self._frame_queue is not None:
+            # Keep the previous pixmap on-screen as a placeholder; request
+            # the new frame asynchronously. Stale-seq results are filtered
+            # in _on_async_frame_ready.
+            self._pending_seek_seq = self._frame_queue.request(
+                Path(self._video_path), seconds,
+                max_dim=self._target_max_dim,
+            )
+            self.update()
+            return
+
+        # Synchronous fallback (no queue injected).
+        pixmap = self._extract_frame(seconds)
+        if pixmap and not pixmap.isNull():
+            self._pixmap = pixmap
+            self._cache[cs_key] = pixmap
+            while len(self._cache) > self._cache_max:
+                self._cache.popitem(last=False)
 
         self._update_scaled_pixmap()
         self.update()
@@ -346,7 +411,10 @@ class VideoFrameWidget(QWidget):
         if not self._video_path:
             return None
         try:
-            img = self._video_service.get_frame(Path(self._video_path), seconds)
+            img = self._video_service.get_frame(
+                Path(self._video_path), seconds,
+                max_dim=self._target_max_dim,
+            )
         except VideoServiceError as e:
             log.warning("get_frame failed for %s @ %s: %s",
                         self._video_path, seconds, e)
@@ -354,6 +422,41 @@ class VideoFrameWidget(QWidget):
         if img.isNull():
             return None
         return QPixmap.fromImage(img)
+
+    def _on_async_frame_ready(self, seq: int, img) -> None:
+        """Slot for FrameRequestQueue.frame_ready.
+
+        Drops stale results (where seq != _pending_seek_seq, meaning the user
+        has scrubbed past this request). Otherwise caches and displays the
+        frame.
+
+        The cache key uses ``_current_time`` rather than the originally
+        requested time -- because we already filter by sequence number, the
+        most-recent request always wins and ``_current_time`` is by definition
+        the time the user wants to see. If a future refactor needs exact
+        per-request time fidelity (e.g. to keep the cache populated for
+        skipped intermediate frames), pack the requested seconds into a
+        small per-seq dict here.
+        """
+        if seq != self._pending_seek_seq:
+            return  # stale
+        if img is None or img.isNull():
+            return
+        pm = QPixmap.fromImage(img)
+        cs_key = int(round(self._current_time * 100))
+        self._pixmap = pm
+        self._cache[cs_key] = pm
+        while len(self._cache) > self._cache_max:
+            self._cache.popitem(last=False)
+        self._update_scaled_pixmap()
+        self.update()
+
+    def _on_async_frame_failed(self, seq: int, message: str) -> None:
+        """Slot for FrameRequestQueue.frame_failed. Drops result + logs; the
+        previously displayed pixmap remains on screen."""
+        if seq != self._pending_seek_seq:
+            return  # stale
+        log.warning("async frame request seq=%d failed: %s", seq, message)
 
     def _update_scaled_pixmap(self):
         if not self._pixmap or self._pixmap.isNull():
@@ -808,8 +911,35 @@ class VideoFrameWidget(QWidget):
         # pixel-size scaling and _ass_to_widget's mapping. Any widget resize
         # changes both, so the entire rect cache is stale.
         self._rect_cache.clear()
+        # Recompute the editor extraction target. Rounded to the nearest
+        # 256 so continuous resize gestures don't fragment the (max_dim-keyed)
+        # cache. When the target shifts by a meaningful amount, drop the
+        # widget pixmap cache since old entries are at the wrong resolution.
+        self._recompute_target_max_dim()
         self._update_scaled_pixmap()
         self.update()
+
+    def _recompute_target_max_dim(self) -> None:
+        """Derive ``_target_max_dim`` from the current widget width.
+
+        Rounded up to the nearest ``_TARGET_RESIZE_ROUND`` (256) so small
+        resize wiggles don't cause cache key churn. If the new target
+        differs from the previous by at least one rounding step, the
+        widget pixmap cache is flushed (entries are at the old resolution).
+        """
+        w = self.width()
+        if w <= 0:
+            new_target = _TARGET_DEFAULT
+        else:
+            new_target = max(
+                _TARGET_MIN,
+                ((w + _TARGET_RESIZE_ROUND - 1) // _TARGET_RESIZE_ROUND)
+                * _TARGET_RESIZE_ROUND,
+            )
+        if abs(new_target - self._target_max_dim) >= _TARGET_RESIZE_ROUND:
+            self._cache.clear()
+            self._pending_seek_seq = 0  # any in-flight result is at old size
+        self._target_max_dim = new_target
 
     # ── Mouse interaction ──
 
@@ -1392,7 +1522,7 @@ class VideoFrameWidget(QWidget):
     def _on_prefetch_frame(self, cs_key: int, pixmap: QPixmap) -> None:
         if cs_key not in self._cache:
             self._cache[cs_key] = pixmap
-            if len(self._cache) > _CACHE_MAX:
+            while len(self._cache) > self._cache_max:
                 self._cache.popitem(last=False)
 
     def _cancel_prefetch(self) -> None:
