@@ -1427,7 +1427,7 @@ class MainWindow(QMainWindow):
                 self._edit.change_style(label.label_id, StylePatch(alignment=alignment))
                 self._edit.move(label.label_id, new_x, new_y)
         self._dirty = True
-        self._player._font_corrections.clear()
+        self._player.clear_font_corrections()
         self._player.update()
         self._refresh_toolbar_for_selection()
         pasted = [k for k, v in clip.items() if v is not None]
@@ -1458,7 +1458,7 @@ class MainWindow(QMainWindow):
             if label.label_id:
                 self._edit.change_style_name(label.label_id, style_name)
         self._dirty = True
-        self._player._font_corrections.clear()
+        self._player.clear_font_corrections()
         self._player.update()
         self._refresh_toolbar_for_selection()
 

@@ -153,7 +153,17 @@ class VideoFrameWidget(QWidget):
         self._ass: AssFile | None = None
         self._font_corrections: dict[tuple[str, bool, bool], float] = {}
         self._visible_labels: list[LabelDialogue] = []
+        # Per-paint scratch dict keyed by line_index, used for hit-testing
+        # and handle/edit positioning between paints. Cleared and repopulated
+        # each paintEvent.
         self._label_rects: dict[int, QRectF] = {}
+        # Persistent cache of computed label rects keyed by LabelId. Avoids
+        # re-running compute_label_rect (which rebuilds QFont per segment and
+        # measures via QFontMetricsF) on every paint. Invalidated on store
+        # signals (mutated/added/removed/file_loaded), widget resize, ass
+        # swap, font-correction changes, and per-affected-id inside the
+        # in-place drag/resize/rotate motion handlers.
+        self._rect_cache: dict[LabelId, QRectF] = {}
 
         # Frame display
         self._pixmap: QPixmap | None = None  # original resolution
@@ -177,9 +187,12 @@ class VideoFrameWidget(QWidget):
         # Refresh visible_labels (which reads from store.state) whenever the
         # store reports structural changes -- the LabelDialogue instances in
         # state get swapped in by mutations, so we re-collect them and repaint.
-        self._store.labels_mutated.connect(self._on_store_labels_changed)
-        self._store.labels_added.connect(self._on_store_labels_changed)
-        self._store.labels_removed.connect(self._on_store_labels_changed)
+        self._store.labels_mutated.connect(self._on_store_labels_mutated)
+        self._store.labels_added.connect(self._on_store_labels_structure_changed)
+        self._store.labels_removed.connect(self._on_store_labels_structure_changed)
+        # File reload wipes everything: rect cache must be flushed because
+        # any cached rects refer to the previous AssFile's geometry.
+        self._store.file_loaded.connect(self._on_store_file_loaded)
 
         # Click/drag distinction
         self._press_pos: QPointF | None = None
@@ -219,11 +232,25 @@ class VideoFrameWidget(QWidget):
     def set_ass(self, ass: AssFile | None):
         self._ass = ass
         self._font_corrections.clear()
+        # Rect cache is keyed by LabelId; on ass swap any stored rects refer
+        # to the previous file's labels and resolutions and MUST be dropped.
+        self._rect_cache.clear()
         # Selection is owned by the store; clearing on file change is the
         # store's job (LabelStore.load wipes selection). We just cancel any
         # in-progress edit.
         self._cancel_editing()
         self.update()
+
+    def clear_font_corrections(self) -> None:
+        """Flush the font-correction cache and (because rect geometry is
+        derived from those corrections) the per-label rect cache.
+
+        Call this from controllers/main_window after operations that change
+        the font name/style for labels (e.g. style-name change, paste-style)
+        because the libass correction factor depends on the QFont family
+        and weight."""
+        self._font_corrections.clear()
+        self._rect_cache.clear()
 
     # --- Store signal slots ---------------------------------------------
 
@@ -231,10 +258,26 @@ class VideoFrameWidget(QWidget):
         """Selection changed in the store — repaint to reflect new state."""
         self.update()
 
-    def _on_store_labels_changed(self, _ids: set) -> None:
-        """Store reported labels added/removed/mutated -- refresh visible list."""
+    def _on_store_labels_mutated(self, ids: set) -> None:
+        """Store reported per-label property changes -- invalidate only those
+        ids in the rect cache, then refresh visible list and repaint."""
+        for lid in ids:
+            self._rect_cache.pop(lid, None)
         self._update_visible_labels(self._current_time)
         self.update()
+
+    def _on_store_labels_structure_changed(self, _ids: set) -> None:
+        """Store reported labels added or removed -- flush the rect cache to
+        be safe (renumbering/reordering can confuse line_index-indexed paint
+        scratch dict), refresh visible list, and repaint."""
+        self._rect_cache.clear()
+        self._update_visible_labels(self._current_time)
+        self.update()
+
+    def _on_store_file_loaded(self, _path: object) -> None:
+        """Store loaded a new file -- drop all cached rects; they referred
+        to the previous AssFile's geometry."""
+        self._rect_cache.clear()
 
     # --- Selection helpers (read-through to the store) ------------------
 
@@ -437,6 +480,17 @@ class VideoFrameWidget(QWidget):
         return font
 
     def _compute_rect(self, label: LabelDialogue, font: QFont) -> QRectF:
+        # Cache hit short-circuits the expensive compute_label_rect path
+        # (which parses rich-text segments, builds a QFont per segment, and
+        # measures each via QFontMetricsF). Invalidation is handled by store
+        # signal slots, set_ass, resizeEvent, clear_font_corrections, and the
+        # drag/resize/rotate motion handlers.
+        lid = label.label_id
+        if lid:
+            cached = self._rect_cache.get(lid)
+            if cached is not None:
+                return cached
+
         _, _, default_bold, default_italic = self._style_for_label(label)
         default_alignment = self._ass.label_alignment if self._ass else 2
 
@@ -449,7 +503,7 @@ class VideoFrameWidget(QWidget):
                 italic_override=italic_override,
             )
 
-        return _compute_label_rect(
+        rect = _compute_label_rect(
             label,
             default_alignment=default_alignment,
             default_bold=default_bold,
@@ -457,6 +511,9 @@ class VideoFrameWidget(QWidget):
             font_provider=font_provider,
             ass_pos_to_widget=self._ass_to_widget,
         )
+        if lid:
+            self._rect_cache[lid] = rect
+        return rect
 
     def _anchor_from_rect(self, rect: QRectF, label: LabelDialogue | None = None) -> QPointF:
         alignment = self._ass.label_alignment if self._ass else 2
@@ -747,6 +804,10 @@ class VideoFrameWidget(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        # Cached rects depend on _frame_w/_frame_h via _font_for_label's
+        # pixel-size scaling and _ass_to_widget's mapping. Any widget resize
+        # changes both, so the entire rect cache is stale.
+        self._rect_cache.clear()
         self._update_scaled_pixmap()
         self.update()
 
@@ -967,6 +1028,13 @@ class VideoFrameWidget(QWidget):
         new_anchor = current_pos + self._drag_offset
         font = self._font_for_label(primary)
 
+        # In-place mutation of LabelDialogue.pos_x/pos_y below bypasses
+        # store signals (per Issue 4) — we must invalidate the rect cache
+        # for the primary so the tentative compute_label_rect call below
+        # actually recomputes (and stores the fresh value).
+        if primary.label_id:
+            self._rect_cache.pop(primary.label_id, None)
+
         # Set tentative position to compute the rect
         ass_x, ass_y = self._widget_to_ass(new_anchor.x(), new_anchor.y())
         primary.pos_x = ass_x
@@ -1063,13 +1131,17 @@ class VideoFrameWidget(QWidget):
         delta_x = final_x - init_x
         delta_y = final_y - init_y
 
-        # Apply delta to all selected labels
+        # Apply delta to all selected labels, invalidating each one's rect
+        # cache entry because the in-place pos_x/pos_y mutation here does
+        # not fire labels_mutated -- the next paint must recompute rects.
         for lb in self.selected_labels():
             lb_init_x, lb_init_y = self._multi_drag_initial.get(
                 lb.line_index, (lb.pos_x, lb.pos_y)
             )
             lb.pos_x = lb_init_x + delta_x
             lb.pos_y = lb_init_y + delta_y
+            if lb.label_id:
+                self._rect_cache.pop(lb.label_id, None)
 
         self.update()
 
@@ -1106,6 +1178,10 @@ class VideoFrameWidget(QWidget):
         # move. The committed mutation is emitted once on mouse release by
         # _finish_resize.
         label.font_size = new_fs
+        # In-place font_size mutation bypasses store signals; invalidate the
+        # rect cache for this label so the next paint recomputes geometry.
+        if label.label_id:
+            self._rect_cache.pop(label.label_id, None)
         self.update()
 
     def _finish_resize(self):
@@ -1132,6 +1208,10 @@ class VideoFrameWidget(QWidget):
         # Normalize to -180..180
         new_rotation = ((new_rotation + 180) % 360) - 180
         label.rotation = new_rotation
+        # In-place rotation mutation bypasses store signals; invalidate the
+        # rect cache for this label so the next paint recomputes geometry.
+        if label.label_id:
+            self._rect_cache.pop(label.label_id, None)
         self.update()
 
     def _finish_rotate(self):
