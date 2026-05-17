@@ -57,6 +57,12 @@ class DerivedGroupModel(QObject):
         super().__init__()
         self._store = store
         self._groups: list[LabelGroup] = []
+        # Per-label cache of the label's own (start_time, end_time) at the
+        # time the current group structure was computed. Maintained by
+        # `_refresh_window_cache` and consulted by `_on_mutated` to skip the
+        # O(N) recompute when no affected label's window has changed (e.g.
+        # position / style / text / colour edits don't touch time fields).
+        self._label_to_group_window: dict[LabelId, tuple[float, float]] = {}
         store.file_loaded.connect(self._rebuild)
         store.labels_added.connect(self._rebuild_signal_all)
         store.labels_removed.connect(self._rebuild_signal_all)
@@ -72,6 +78,7 @@ class DerivedGroupModel(QObject):
     def _rebuild(self, *_args) -> None:
         old_ids = {g.group_id for g in self._groups}
         self._groups = self._compute_groups()
+        self._refresh_window_cache()
         new_ids = {g.group_id for g in self._groups}
         if old_ids != new_ids or old_ids:
             self.groups_changed.emit(old_ids | new_ids)
@@ -80,8 +87,32 @@ class DerivedGroupModel(QObject):
         self._rebuild()
 
     def _on_mutated(self, affected_ids: set) -> None:
-        """Rebuild only if the new group structure differs from the old.
-        (Position-only changes don't affect groups, so we skip the emit.)"""
+        """Rebuild only if an affected label's time window has changed.
+
+        For position / style / text edits the label's (start_time, end_time)
+        is unchanged, so the interval-merge result is guaranteed identical
+        and we can skip the O(N) recompute entirely. We consult the
+        per-label group-window cache populated by ``_compute_groups``.
+        """
+        state = self._store.state
+        windows_changed = False
+        for lid in affected_ids:
+            label = state.labels.get(lid)
+            if label is None:
+                # Label vanished from state -- treat as a structural change.
+                windows_changed = True
+                break
+            cached_window = self._label_to_group_window.get(lid)
+            if cached_window is None:
+                # Newly tracked id we don't know about; play it safe.
+                windows_changed = True
+                break
+            if (label.start_time, label.end_time) != cached_window:
+                windows_changed = True
+                break
+        if not windows_changed:
+            return
+
         old_groups = self._groups
         new_groups = self._compute_groups()
         old_key = [(g.label_ids, g.start, g.end) for g in old_groups]
@@ -90,8 +121,28 @@ class DerivedGroupModel(QObject):
             old_ids = {g.group_id for g in old_groups}
             new_ids = {g.group_id for g in new_groups}
             self._groups = new_groups
+            self._refresh_window_cache()
             self.groups_changed.emit(old_ids | new_ids)
-        # else: identical, no emit
+        # else: identical, no emit (cache is still valid since structure is
+        # the same).
+
+    def _refresh_window_cache(self) -> None:
+        """Rebuild ``_label_to_group_window`` from the live store state.
+
+        Stores each label's OWN (start_time, end_time) -- not the group's
+        merged span -- so that `_on_mutated` can detect when a mutation
+        actually moved the label's time window. Two labels in the same
+        group can have different individual windows; comparing the
+        group's merged span would produce false positives.
+        """
+        state = self._store.state
+        cache: dict[LabelId, tuple[float, float]] = {}
+        for g in self._groups:
+            for lid in g.label_ids:
+                label = state.labels.get(lid)
+                if label is not None:
+                    cache[lid] = (label.start_time, label.end_time)
+        self._label_to_group_window = cache
 
     # --- Computation -----------------------------------------------
 

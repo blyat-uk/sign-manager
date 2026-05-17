@@ -1098,15 +1098,23 @@ class VideoFrameWidget(QWidget):
             return
         scale = current_dist / self._resize_initial_dist
         new_fs = max(_MIN_FONT_SIZE, round(self._resize_initial_fs * scale))
-        # Live preview: mutate the LabelDialogue in place. It's the same
-        # Python object the store holds, so the next paint sees the new size
-        # without a mutation round-trip. The final size is committed via the
-        # label_resized signal -> ResizeLabel mutation in _finish_resize.
+        # Live preview only: mutate the LabelDialogue in place so the next
+        # paint shows the new size. Do NOT emit label_resized here -- that
+        # would route through the edit controller and submit a ResizeLabel
+        # mutation per pixel of motion, causing the gallery to spawn a
+        # thumbnail-refresh worker and the toolbar to re-sync on every mouse
+        # move. The committed mutation is emitted once on mouse release by
+        # _finish_resize.
         label.font_size = new_fs
-        self.label_resized.emit(label, new_fs)
         self.update()
 
     def _finish_resize(self):
+        label = self._handle_label
+        if label and label.font_size is not None:
+            # Commit the final size via signal -> ResizeLabel mutation in
+            # controller. This is the only store-visible event for the whole
+            # resize gesture.
+            self.label_resized.emit(label, label.font_size)
         self._handle_label = None
         self.update()
 

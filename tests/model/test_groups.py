@@ -270,3 +270,19 @@ def test_group_id_stable_across_position_only_mutation(qapp):
     lid = store.state.order[0]
     store.apply(MoveLabel(label_id=lid, new_x=42.0, new_y=42.0))
     assert groups.groups[0].group_id == gid_before
+
+
+def test_groups_unchanged_skips_emit_for_position_only_mutation(qapp):
+    """Per-pixel drag emits labels_mutated; groups model MUST NOT re-emit
+    groups_changed for position-only changes (gallery refresh suppression)."""
+    store = LabelStore()
+    groups = DerivedGroupModel(store)
+    store.load(AssFile.from_path(FIXTURE), source_path=FIXTURE)
+
+    received = []
+    groups.groups_changed.connect(lambda ids: received.append(ids))
+    lid = store.state.order[0]
+    store.apply(MoveLabel(label_id=lid, new_x=99, new_y=42))
+
+    # No emission because group structure (time windows) didn't change.
+    assert received == [], f"unexpected groups_changed emission: {received}"
