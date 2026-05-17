@@ -758,21 +758,22 @@ class MainWindow(QMainWindow):
         vc_layout.addWidget(self._video_stack, 1)
         vc_layout.addWidget(self._timeline, 0)
 
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.addWidget(video_container)
+        self._splitter = QSplitter(Qt.Orientation.Vertical)
+        self._splitter.addWidget(video_container)
         from PyQt6.QtWidgets import QWidget as _Widget, QVBoxLayout as _VBox
         from sub_label_pos.ui.gallery_widget import GalleryHandle
-        gallery_container = _Widget()
-        gallery_layout = _VBox(gallery_container)
+        self._gallery_container = _Widget()
+        gallery_layout = _VBox(self._gallery_container)
         gallery_layout.setContentsMargins(0, 0, 0, 0)
         gallery_layout.setSpacing(0)
         self._gallery_handle = GalleryHandle()
         self._gallery_handle.toggled.connect(self._on_gallery_handle_toggled)
         gallery_layout.addWidget(self._gallery_handle)
         gallery_layout.addWidget(self._gallery)
-        splitter.addWidget(gallery_container)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
+        self._splitter.addWidget(self._gallery_container)
+        self._splitter.setStretchFactor(0, 1)
+        self._splitter.setStretchFactor(1, 0)
+        splitter = self._splitter  # alias for the remaining setup below
 
         # Stacked widget: page 0 = welcome, page 1 = editor
         self._welcome = WelcomeWidget()
@@ -2472,14 +2473,9 @@ class MainWindow(QMainWindow):
             log.exception("Failed to persist mpv_quality setting")
 
     def _on_gallery_handle_toggled(self, expanded: bool) -> None:
-        self._gallery.setVisible(expanded)
-        self._app_settings.display.gallery_visible = expanded
-        from sub_label_pos.services.app_settings import save_display
-        save_display(self._app_settings.display)
-        if hasattr(self, "_gallery_btn") and self._gallery_btn.isChecked() != expanded:
-            self._gallery_btn.blockSignals(True)
-            self._gallery_btn.setChecked(expanded)
-            self._gallery_btn.blockSignals(False)
+        # Delegate to the canonical toggler so handle/toolbar/dialog all
+        # resize the splitter and sync each other.
+        self._on_gallery_toggled(expanded)
 
     def _on_show_gallery_toggled(self, checked: bool) -> None:
         """Legacy slot — delegates to the new _on_gallery_toggled."""
@@ -2494,6 +2490,7 @@ class MainWindow(QMainWindow):
         no-op so no ffmpeg/CPU work is spent rendering invisible thumbs.
         """
         self._gallery.setVisible(visible)
+        self._resize_gallery_container(visible)
         self._app_settings.display.gallery_visible = visible
         from sub_label_pos.services.app_settings import save_display
         save_display(self._app_settings.display)
@@ -2503,6 +2500,28 @@ class MainWindow(QMainWindow):
             self._gallery_btn.blockSignals(False)
         if hasattr(self, "_gallery_handle") and self._gallery_handle._expanded != visible:
             self._gallery_handle.set_expanded(visible)
+
+    def _resize_gallery_container(self, expanded: bool) -> None:
+        """Shrink the gallery container to the handle height when collapsed.
+
+        Without this, the splitter keeps the container at its prior expanded
+        size and the handle floats mid-screen with empty space below it.
+        """
+        if not hasattr(self, "_splitter"):
+            return
+        sizes = self._splitter.sizes()
+        if len(sizes) < 2:
+            return
+        # Use the splitter's actual height as the source of truth — sizes()
+        # can be [0, 0] before the first layout pass on first show.
+        total = self._splitter.height() or sum(sizes) or 720
+        handle_h = max(24, self._gallery_handle.sizeHint().height())
+        if expanded:
+            target = max(160, sizes[1] if sizes[1] > handle_h else 0, 160)
+            target = min(target, max(handle_h, total - 100))
+        else:
+            target = handle_h
+        self._splitter.setSizes([max(0, total - target), target])
 
     def _on_sidebar_toggled(self, visible: bool) -> None:
         """Toggle the file sidebar dock visibility and persist the choice."""
