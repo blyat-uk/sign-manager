@@ -33,9 +33,17 @@ class PerfSettings:
 
 
 @dataclass
+class DisplaySettings:
+    """User-toggleable visibility of UI surfaces."""
+    gallery_visible: bool = True
+    sidebar_visible: bool = True
+
+
+@dataclass
 class AppSettings:
     """Root settings document."""
     perf: PerfSettings = field(default_factory=PerfSettings)
+    display: DisplaySettings = field(default_factory=DisplaySettings)
     hardware_tier: str = "medium"        # informational; perf is the source of truth
     detected_ram_gb: float = 0.0
     detected_cpu_cores: int = 0
@@ -59,6 +67,7 @@ def from_profile(profile: HardwareProfile) -> AppSettings:
         )
     return AppSettings(
         perf=perf,
+        display=DisplaySettings(gallery_visible=perf.gallery_enabled, sidebar_visible=True),
         hardware_tier=profile.tier,
         detected_ram_gb=round(profile.total_ram_gb, 2),
         detected_cpu_cores=profile.cpu_cores,
@@ -129,6 +138,20 @@ def save_perf(perf: PerfSettings, path: Path | None = None) -> None:
     save(settings, p)
 
 
+def save_display(display: DisplaySettings, path: Path | None = None) -> None:
+    """Persist just the display section, keeping other top-level fields intact."""
+    p = path or _settings_path()
+    if p.exists():
+        try:
+            settings = load(p)
+        except Exception:
+            settings = AppSettings(display=display)
+    else:
+        settings = AppSettings(display=display)
+    settings.display = display
+    save(settings, p)
+
+
 def redetect(path: Path | None = None) -> AppSettings:
     """Re-run hardware detection and overwrite settings.
 
@@ -147,6 +170,7 @@ def _to_dict(s: AppSettings) -> dict:
         "detected_ram_gb": s.detected_ram_gb,
         "detected_cpu_cores": s.detected_cpu_cores,
         "perf": asdict(s.perf),
+        "display": asdict(s.display),
     }
 
 
@@ -155,8 +179,23 @@ def _from_dict(data: dict) -> AppSettings:
     perf_fields = {f.name for f in fields(PerfSettings)}
     # Drop unknown keys; use defaults for missing
     perf = PerfSettings(**{k: v for k, v in perf_data.items() if k in perf_fields})
+
+    display_data = data.get("display", {})
+    display_fields = {f.name for f in fields(DisplaySettings)}
+    if display_data:
+        display = DisplaySettings(
+            **{k: v for k, v in display_data.items() if k in display_fields}
+        )
+    else:
+        # Backward-compat: derive from perf for first read of a legacy file
+        display = DisplaySettings(
+            gallery_visible=perf.gallery_enabled,
+            sidebar_visible=True,
+        )
+
     return AppSettings(
         perf=perf,
+        display=display,
         hardware_tier=data.get("hardware_tier", "medium"),
         detected_ram_gb=float(data.get("detected_ram_gb", 0.0)),
         detected_cpu_cores=int(data.get("detected_cpu_cores", 0)),
