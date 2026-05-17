@@ -655,6 +655,8 @@ class MainWindow(QMainWindow):
         self._files_dock.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
         )
+        # No close/float buttons; cannot be dragged out to a floating window.
+        self._files_dock.setFeatures(QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
         dock_content = QWidget()
         dock_content.setStyleSheet(f"background: {theme.Tokens.bg_deepest};")
         dock_layout = QVBoxLayout(dock_content)
