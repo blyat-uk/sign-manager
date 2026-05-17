@@ -41,7 +41,11 @@ from sub_label_pos.model.ass_file import (
 )
 from sub_label_pos.model.groups import DerivedGroupModel
 from sub_label_pos.model.label_store import LabelStore
-from sub_label_pos.services.app_settings import load as load_settings, redetect as redetect_settings
+from sub_label_pos.services.app_settings import (
+    load as load_settings,
+    redetect as redetect_settings,
+    save_perf as save_perf_settings,
+)
 from sub_label_pos.services.exceptions import VideoServiceError
 from sub_label_pos.services.ffmpeg_service import FFmpegVideoService
 from sub_label_pos.services.frame_cache import FrameCache
@@ -488,10 +492,12 @@ class MainWindow(QMainWindow):
 
         # Layout: splitter with video stack + timeline on top, gallery on bottom
         self._mpv_widget = MpvPreviewWidget()
-        # Apply saved mpv settings before GL init (initializeGL is lazy)
+        # Apply saved mpv settings before GL init (initializeGL is lazy).
+        # ``mpv/hwdec`` lives in QSettings (hardware-policy, per-machine).
+        # ``mpv_quality`` lives in PerfSettings (tier-aware, persisted there).
         _init_settings = QSettings("SubLabelPos", "SubLabelPos")
         self._mpv_widget._hwdec = _init_settings.value("mpv/hwdec", "auto-safe")
-        self._mpv_widget._hq = _init_settings.value("mpv/high_quality", False, type=bool)
+        self._mpv_widget._hq = (self._app_settings.perf.mpv_quality == "high")
         self._player = VideoFrameWidget(
             self._store,
             self._video_service,
@@ -550,6 +556,16 @@ class MainWindow(QMainWindow):
         # Menu bar (currently only holds rarely-used settings actions)
         menu_settings = self.menuBar().addMenu("&Settings")
         menu_settings.addAction("Re-detect Hardware…", self._on_redetect_hardware)
+
+        # Gallery visibility toggle (tier-aware default lives in PerfSettings).
+        self._show_gallery_action = QAction("Show Gallery", self)
+        self._show_gallery_action.setCheckable(True)
+        self._show_gallery_action.setChecked(self._app_settings.perf.gallery_enabled)
+        self._show_gallery_action.toggled.connect(self._on_show_gallery_toggled)
+        menu_settings.addAction(self._show_gallery_action)
+
+        # Apply initial visibility (default-True on medium/high, default-False on low).
+        self._gallery.setVisible(self._app_settings.perf.gallery_enabled)
 
         # Main toolbar
         self._main_tb = QToolBar("Main")
@@ -610,7 +626,7 @@ class MainWindow(QMainWindow):
 
         self._hq_checkbox = QCheckBox("High Quality")
         self._hq_checkbox.setToolTip("Enable spline36 scaling, debanding, and other quality options")
-        self._hq_checkbox.setChecked(_init_settings.value("mpv/high_quality", False, type=bool))
+        self._hq_checkbox.setChecked(self._app_settings.perf.mpv_quality == "high")
         self._hq_checkbox.toggled.connect(self._on_hq_toggled)
         self._main_tb.addWidget(self._hq_checkbox)
 
@@ -1959,7 +1975,28 @@ class MainWindow(QMainWindow):
 
     def _on_hq_toggled(self, checked: bool) -> None:
         self._mpv_widget.set_high_quality(checked)
-        self._settings.setValue("mpv/high_quality", checked)
+        # Persist into PerfSettings so the next launch remembers regardless
+        # of hardware tier defaults.
+        self._app_settings.perf.mpv_quality = "high" if checked else "low"
+        try:
+            save_perf_settings(self._app_settings.perf)
+        except Exception:
+            log.exception("Failed to persist mpv_quality setting")
+
+    def _on_show_gallery_toggled(self, checked: bool) -> None:
+        """Toggle the gallery panel's visibility and persist the choice.
+
+        When the gallery becomes visible its own ``showEvent`` triggers a
+        one-time thumbnail rebuild so it picks up the current store state.
+        When hidden, ``_start_thumbnail_loading``/``_refresh_single_thumbnail``
+        no-op so no ffmpeg/CPU work is spent rendering invisible thumbs.
+        """
+        self._gallery.setVisible(checked)
+        self._app_settings.perf.gallery_enabled = checked
+        try:
+            save_perf_settings(self._app_settings.perf)
+        except Exception:
+            log.exception("Failed to persist gallery_enabled setting")
 
     # ── Cleanup ──
 

@@ -49,3 +49,43 @@ def test_invalid_settings_file_triggers_redetect(tmp_path):
     loaded = load(p)
     # Should have re-detected and overwritten
     assert json.loads(p.read_text())["version"] == 1
+
+
+def test_low_tier_defaults_disable_gallery():
+    s = from_profile(HardwareProfile(total_ram_gb=4.0, cpu_cores=8, tier="low"))
+    assert s.perf.gallery_enabled is False
+    assert s.perf.mpv_quality == "low"
+
+
+def test_medium_tier_defaults_enable_gallery():
+    s = from_profile(HardwareProfile(total_ram_gb=10.0, cpu_cores=8, tier="medium"))
+    assert s.perf.gallery_enabled is True
+    assert s.perf.mpv_quality == "high"
+
+
+def test_high_tier_defaults_enable_gallery():
+    s = from_profile(HardwareProfile(total_ram_gb=32.0, cpu_cores=16, tier="high"))
+    assert s.perf.gallery_enabled is True
+    assert s.perf.mpv_quality == "high"
+
+
+def test_save_perf_preserves_other_fields(tmp_path):
+    from sub_label_pos.services.app_settings import save_perf
+    p = tmp_path / "settings.json"
+    original = AppSettings(
+        perf=PerfSettings(thumb_max_dim=800, gallery_enabled=True, mpv_quality="high"),
+        hardware_tier="high",
+        detected_ram_gb=32.0,
+        detected_cpu_cores=16,
+    )
+    save(original, p)
+    # Mutate perf and persist via save_perf.
+    new_perf = PerfSettings(thumb_max_dim=800, gallery_enabled=False, mpv_quality="low")
+    save_perf(new_perf, p)
+    reloaded = load(p)
+    assert reloaded.perf.gallery_enabled is False
+    assert reloaded.perf.mpv_quality == "low"
+    # Other fields untouched.
+    assert reloaded.hardware_tier == "high"
+    assert reloaded.detected_ram_gb == 32.0
+    assert reloaded.detected_cpu_cores == 16

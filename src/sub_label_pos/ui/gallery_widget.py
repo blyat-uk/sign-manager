@@ -698,6 +698,12 @@ class GalleryPanel(QWidget):
     def _start_thumbnail_loading(self, skip_indices: set[int] | None = None):
         if not self._ass or not self._video_path:
             return
+        # Skip the (potentially expensive) bulk ffmpeg + render work when the
+        # gallery is hidden. ``showEvent`` re-triggers loading when the panel
+        # becomes visible again. Saves CPU/IO on low-tier hardware where the
+        # gallery is opt-in (PerfSettings.gallery_enabled defaults to False).
+        if not self.isVisible():
+            return
         # Filter out groups that already have a cached/applied thumbnail. We
         # still pass the full groups list (so indices match) — the worker just
         # skips entries we mark, but ThumbnailWorker doesn't have a skip hook,
@@ -777,6 +783,11 @@ class GalleryPanel(QWidget):
         """Re-extract frame and re-crop for a single group asynchronously."""
         if not (0 <= index < len(self._groups)) or not self._video_path or not self._ass:
             return
+        # Skip work while hidden; ``showEvent`` triggers a bulk rebuild on
+        # re-show, which covers any thumbnails that would have been refreshed
+        # individually while we were invisible.
+        if not self.isVisible():
+            return
         group = self._groups[index]
         thumb = self._thumbnails[index]
         thumb.update_texts([lb.text for lb in group.labels])
@@ -849,6 +860,26 @@ class GalleryPanel(QWidget):
             if thread.isRunning():
                 thread.quit()
                 thread.wait(wait_ms)
+
+    def showEvent(self, event):  # type: ignore[override]
+        """Trigger a one-time bulk thumbnail rebuild when the panel becomes
+        visible after being hidden.
+
+        While hidden, ``_start_thumbnail_loading`` and
+        ``_refresh_single_thumbnail`` no-op, so on re-show we may have stale
+        or missing thumbnails. Spawning the bulk worker here brings the
+        gallery back in sync with the current store state. The guard on
+        ``_thumb_thread`` avoids stacking workers when Qt fires showEvent
+        for non-visibility reasons (parent reshow, theme change, etc.).
+        """
+        super().showEvent(event)
+        if (
+            self._groups
+            and self._video_path
+            and self._ass
+            and self._thumb_thread is None
+        ):
+            self._start_thumbnail_loading()
 
     def select_group(self, index: int):
         if self._selected_index >= 0 and self._selected_index < len(self._thumbnails):
