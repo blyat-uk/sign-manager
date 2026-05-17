@@ -29,8 +29,21 @@ class VideoService(Protocol):
         """Return average frame rate (frames per second)."""
         ...
 
-    def get_frame(self, path: Path, seconds: float) -> QImage:
-        """Extract a single frame at the given timestamp (seconds)."""
+    def get_frame(
+        self,
+        path: Path,
+        seconds: float,
+        *,
+        max_dim: int | None = None,
+        jpeg_quality: int | None = None,
+    ) -> QImage:
+        """Extract a single frame.
+
+        - max_dim: if set, ffmpeg downscales so neither dimension exceeds it.
+          Aspect ratio preserved. None = native resolution.
+        - jpeg_quality: if set (2-31, lower is better quality), ffmpeg outputs
+          MJPEG instead of PNG. None = lossless PNG.
+        """
         ...
 
 
@@ -57,11 +70,22 @@ class CachedVideoService:
     def get_fps(self, path: Path) -> float:
         return self._inner.get_fps(path)
 
-    def get_frame(self, path: Path, seconds: float) -> QImage:
-        key = (str(path), round(seconds, 3))
+    def get_frame(
+        self,
+        path: Path,
+        seconds: float,
+        *,
+        max_dim: int | None = None,
+        jpeg_quality: int | None = None,
+    ) -> QImage:
+        # Cache key MUST include max_dim + jpeg_quality so the editor's native
+        # PNG entry doesn't collide with a thumbnail's downscaled MJPEG entry.
+        key = (str(path), round(seconds, 3), max_dim, jpeg_quality)
         hit = self._cache.get(key)
         if hit is not None:
             return hit
-        img = self._inner.get_frame(path, seconds)   # propagates exceptions
+        img = self._inner.get_frame(
+            path, seconds, max_dim=max_dim, jpeg_quality=jpeg_quality,
+        )  # propagates exceptions
         self._cache.put(key, img)
         return img

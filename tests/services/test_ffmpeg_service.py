@@ -150,6 +150,47 @@ def test_get_frame_raises_on_called_process_error(mocker):
         FFmpegVideoService().get_frame(Path("/x.mkv"), 1.0)
 
 
+# --- new keyword params: max_dim + jpeg_quality -----------------------
+
+def test_get_frame_with_max_dim_adds_scale_filter(mocker):
+    captured = []
+    def fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        return mocker.Mock(returncode=0, stdout=b'fake-image-bytes', stderr=b'')
+    mocker.patch("subprocess.run", side_effect=fake_run)
+    mocker.patch("PyQt6.QtGui.QImage.fromData", return_value=mocker.Mock(isNull=lambda: False))
+    FFmpegVideoService().get_frame(Path("/x.mkv"), 1.0, max_dim=480)
+    assert any("scale=" in arg for arg in captured[0])
+    assert any("480" in arg for arg in captured[0])
+
+
+def test_get_frame_with_jpeg_quality_uses_mjpeg(mocker):
+    captured = []
+    def fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        return mocker.Mock(returncode=0, stdout=b'fake-image-bytes', stderr=b'')
+    mocker.patch("subprocess.run", side_effect=fake_run)
+    mocker.patch("PyQt6.QtGui.QImage.fromData", return_value=mocker.Mock(isNull=lambda: False))
+    FFmpegVideoService().get_frame(Path("/x.mkv"), 1.0, jpeg_quality=6)
+    assert "mjpeg" in " ".join(captured[0])
+    assert "6" in captured[0]
+
+
+def test_get_frame_defaults_preserve_png(mocker):
+    """Default call (no kwargs) must still produce lossless PNG, no scale."""
+    captured = []
+    def fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        return mocker.Mock(returncode=0, stdout=b'fake-image-bytes', stderr=b'')
+    mocker.patch("subprocess.run", side_effect=fake_run)
+    mocker.patch("PyQt6.QtGui.QImage.fromData", return_value=mocker.Mock(isNull=lambda: False))
+    FFmpegVideoService().get_frame(Path("/x.mkv"), 1.0)
+    cmd = captured[0]
+    assert "png" in cmd
+    assert "mjpeg" not in cmd
+    assert not any("scale=" in arg for arg in cmd)
+
+
 # --- configurable bin paths + timeout ---------------------------------
 
 def test_custom_bin_paths_and_timeout(mocker):

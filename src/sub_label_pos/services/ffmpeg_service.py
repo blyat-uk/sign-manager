@@ -67,16 +67,49 @@ class FFmpegVideoService:
 
     # --- ffmpeg frame extraction ----------------------------------------
 
-    def get_frame(self, path: Path, seconds: float) -> QImage:
-        cmd = [
+    def get_frame(
+        self,
+        path: Path,
+        seconds: float,
+        *,
+        max_dim: int | None = None,
+        jpeg_quality: int | None = None,
+    ) -> QImage:
+        # Build ffmpeg command dynamically. Defaults preserve historical
+        # behaviour: lossless PNG at native resolution.
+        cmd: list[str] = [
             self._ffmpeg,
             "-ss", f"{seconds:.3f}",
             "-i", str(path),
             "-frames:v", "1",
-            "-f", "image2pipe",
-            "-vcodec", "png",
-            "-",
         ]
+
+        if max_dim is not None:
+            # Downscale so neither dim exceeds max_dim, preserving aspect
+            # ratio. force_original_aspect_ratio=decrease guarantees we
+            # never upscale (it picks the smaller of w/h scale factors).
+            cmd += [
+                "-vf",
+                f"scale=w='min(iw,{max_dim})':h='min(ih,{max_dim})':"
+                f"force_original_aspect_ratio=decrease",
+            ]
+
+        if jpeg_quality is not None:
+            # MJPEG single-frame output, smaller + faster than PNG.
+            cmd += [
+                "-f", "image2pipe",
+                "-vcodec", "mjpeg",
+                "-q:v", str(jpeg_quality),
+                "-",
+            ]
+        else:
+            # Lossless PNG (historical default).
+            cmd += [
+                "-f", "image2pipe",
+                "-vcodec", "png",
+                "-",
+            ]
+
         try:
             result = subprocess.run(
                 cmd, check=True, capture_output=True, timeout=self._timeout,
@@ -100,10 +133,13 @@ class FFmpegVideoService:
                 f"ffmpeg returned no data for {path} @ {seconds:.3f}s"
             )
 
+        # QImage.fromData auto-detects format from the byte signature; works
+        # for both PNG and JPEG output without specifying.
         img = QImage.fromData(result.stdout)
         if img.isNull():
+            fmt = "JPEG" if jpeg_quality is not None else "PNG"
             raise FrameExtractionError(
-                f"failed to decode PNG output for {path} @ {seconds:.3f}s"
+                f"failed to decode {fmt} output for {path} @ {seconds:.3f}s"
             )
         return img
 

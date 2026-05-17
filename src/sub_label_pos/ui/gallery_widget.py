@@ -243,6 +243,8 @@ class ThumbnailWorker(QObject):
         font_correction: float = 1.0,
         styles: dict[str, AssStyle] | None = None,
         font_corrections: dict[tuple[str, bool, bool], float] | None = None,
+        thumb_max_dim: int = 720,
+        thumb_jpeg_quality: int = 6,
     ):
         super().__init__()
         self._svc = video_service
@@ -258,6 +260,8 @@ class ThumbnailWorker(QObject):
         self._font_correction = font_correction
         self._styles = styles
         self._font_corrections = font_corrections if font_corrections is not None else {}
+        self._thumb_max_dim = thumb_max_dim
+        self._thumb_jpeg_quality = thumb_jpeg_quality
         self._cancelled = False
 
     def cancel(self):
@@ -269,7 +273,12 @@ class ThumbnailWorker(QObject):
             if self._cancelled:
                 break
             try:
-                img = self._svc.get_frame(p, group.representative_time)
+                img = self._svc.get_frame(
+                    p,
+                    group.representative_time,
+                    max_dim=self._thumb_max_dim,
+                    jpeg_quality=self._thumb_jpeg_quality,
+                )
             except VideoServiceError as e:
                 log.warning("thumbnail get_frame failed for %s @ %s: %s",
                             self._video_path, group.representative_time, e)
@@ -311,6 +320,8 @@ class SingleThumbnailWorker(QObject):
         font_correction: float = 1.0,
         styles: dict[str, AssStyle] | None = None,
         font_corrections: dict[tuple[str, bool, bool], float] | None = None,
+        thumb_max_dim: int = 720,
+        thumb_jpeg_quality: int = 6,
     ):
         super().__init__()
         self._svc = video_service
@@ -328,6 +339,8 @@ class SingleThumbnailWorker(QObject):
         self._font_correction = font_correction
         self._styles = styles
         self._font_corrections = font_corrections if font_corrections is not None else {}
+        self._thumb_max_dim = thumb_max_dim
+        self._thumb_jpeg_quality = thumb_jpeg_quality
         self._cancelled = False
 
     def cancel(self):
@@ -338,7 +351,12 @@ class SingleThumbnailWorker(QObject):
             self.finished.emit()
             return
         try:
-            img = self._svc.get_frame(Path(self._video_path), self._representative_time)
+            img = self._svc.get_frame(
+                Path(self._video_path),
+                self._representative_time,
+                max_dim=self._thumb_max_dim,
+                jpeg_quality=self._thumb_jpeg_quality,
+            )
         except VideoServiceError as e:
             log.warning("single-thumb get_frame failed for %s @ %s: %s",
                         self._video_path, self._representative_time, e)
@@ -695,6 +713,9 @@ class GalleryPanel(QWidget):
             self._font_correction,
             styles=dict(self._ass.styles),
             font_corrections=dict(getattr(self, '_font_corrections', {})),
+            # Hardcoded for now; Pass 3 will read these from settings.
+            thumb_max_dim=720,
+            thumb_jpeg_quality=6,
         )
         # Parent thread to self so Qt owns it; PyQt won't garbage-collect
         # while the underlying OS thread is still running. deleteLater on
@@ -773,6 +794,9 @@ class GalleryPanel(QWidget):
             self._font_correction,
             styles=dict(self._ass.styles),
             font_corrections=dict(getattr(self, '_font_corrections', {})),
+            # Hardcoded for now; Pass 3 will read these from settings.
+            thumb_max_dim=720,
+            thumb_jpeg_quality=6,
         )
         self._single_thread = QThread(self)
         self._single_worker.moveToThread(self._single_thread)

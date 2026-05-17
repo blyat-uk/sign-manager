@@ -58,7 +58,7 @@ def test_cached_get_frame_rounds_seconds_for_key():
     """Two seconds values within 1ms should hit the same cache entry."""
     class Fake:
         calls = 0
-        def get_frame(self, path, seconds):
+        def get_frame(self, path, seconds, *, max_dim=None, jpeg_quality=None):
             Fake.calls += 1
             return f"frame-{seconds}"
     inner = Fake()
@@ -68,3 +68,21 @@ def test_cached_get_frame_rounds_seconds_for_key():
     svc.get_frame(Path("/x.mkv"), 1.0009)   # rounded to 1.001
     # First two should hit cache once; third is a separate key
     assert inner.calls == 2
+
+
+def test_cached_separate_entries_per_max_dim(mocker):
+    inner = mocker.Mock()
+    inner.get_frame.return_value = object()
+    svc = CachedVideoService(inner, FrameCache(max_size=8))
+    svc.get_frame(Path("/x.mkv"), 1.0)               # native
+    svc.get_frame(Path("/x.mkv"), 1.0, max_dim=480)  # downscaled - different key
+    assert inner.get_frame.call_count == 2
+
+
+def test_cached_separate_entries_per_jpeg_quality(mocker):
+    inner = mocker.Mock()
+    inner.get_frame.return_value = object()
+    svc = CachedVideoService(inner, FrameCache(max_size=8))
+    svc.get_frame(Path("/x.mkv"), 1.0)                       # PNG
+    svc.get_frame(Path("/x.mkv"), 1.0, jpeg_quality=6)       # MJPEG - different key
+    assert inner.get_frame.call_count == 2
