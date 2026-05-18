@@ -61,6 +61,9 @@ from sub_label_pos import shortcuts
 from sub_label_pos.ui.controllers.file_loader import FileLoader, VideoFilePair
 from sub_label_pos.ui.controllers.label_edit_controller import LabelEditController
 from sub_label_pos.ui.controllers.playback_orchestrator import PlaybackOrchestrator
+from sub_label_pos.ui.controllers.retime_controller import RetimeController
+from sub_label_pos.ui.retime_bar import RetimeBar
+from sub_label_pos.ui.focused_timeline import FocusedTimeline
 from sub_label_pos.ui.video_widget import VideoFrameWidget
 from sub_label_pos.ui.gallery_widget import GalleryPanel, LabelGroup, compute_label_groups, _crop_to_labels_image, _best_representative_time
 from sub_label_pos.ui.label_toolbar import LabelToolbar
@@ -643,6 +646,11 @@ class MainWindow(QMainWindow):
         self._store = LabelStore()
         self._groups_model = DerivedGroupModel(self._store)
         self._edit = LabelEditController(self._store)
+        self._retime = RetimeController(
+            self._store, self._edit,
+            fps_provider=lambda: getattr(self._player, "_fps", 0.0),
+            current_time_provider=lambda: getattr(self._player, "_current_time", 0.0),
+        )
 
         self._ass: AssFile | None = None
         self._groups: list[LabelGroup] = []
@@ -780,6 +788,12 @@ class MainWindow(QMainWindow):
             thumb_jpeg_quality=perf.thumb_jpeg_quality,
         )
         self._timeline = TimelineWidget(groups=self._groups_model)
+        self._retime_bar = RetimeBar(self._store, self._retime, parent=self)
+        self._focused_timeline = FocusedTimeline(
+            self._store, self._retime,
+            fps_provider=lambda: getattr(self._player, "_fps", 0.0),
+            parent=self,
+        )
 
         # Video stack: page 0 = mpv (playback), page 1 = editor (QPainter)
         self._video_stack = QStackedWidget()
@@ -795,12 +809,16 @@ class MainWindow(QMainWindow):
         self._playback.set_start_time_provider(self._playback_start_time)
         self._playback.mode_changed.connect(self._on_playback_mode_changed)
 
-        # Container for video stack + timeline (no splitter between them)
+        # Container for video stack + retime bar + focused timeline + timeline
+        # Order: 1. video stack (canvas), 2. RetimeBar, 3. FocusedTimeline,
+        #        4. main TimelineWidget
         video_container = QWidget()
         vc_layout = QVBoxLayout(video_container)
         vc_layout.setContentsMargins(0, 0, 0, 0)
         vc_layout.setSpacing(0)
         vc_layout.addWidget(self._video_stack, 1)
+        vc_layout.addWidget(self._retime_bar, 0)
+        vc_layout.addWidget(self._focused_timeline, 0)
         vc_layout.addWidget(self._timeline, 0)
 
         self._splitter = QSplitter(Qt.Orientation.Vertical)
@@ -1027,6 +1045,11 @@ class MainWindow(QMainWindow):
                   lambda: self._labels_sidebar_btn.toggle())
         QShortcut(shortcuts.DUPLICATE, self, lambda: self._toolbar.duplicate_clicked.emit())
         QShortcut(shortcuts.PASTE_STYLE, self, lambda: self._toolbar.paste_style_clicked.emit())
+        # Retiming shortcuts
+        QShortcut(shortcuts.SET_IN, self).activated.connect(self._retime.set_in_at_current)
+        QShortcut(shortcuts.SET_OUT, self).activated.connect(self._retime.set_out_at_current)
+        QShortcut(shortcuts.NUDGE_BOTH_PREV, self).activated.connect(lambda: self._retime.nudge_both(-1))
+        QShortcut(shortcuts.NUDGE_BOTH_NEXT, self).activated.connect(lambda: self._retime.nudge_both(+1))
 
         # ── Connect signals ──
 
@@ -1078,6 +1101,13 @@ class MainWindow(QMainWindow):
         self._timeline.play_toggled.connect(self._on_play_toggled)
         self._timeline.step_requested.connect(self._on_timeline_step)
         self._timeline.group_clicked.connect(self._goto_group)
+
+        # Focused timeline signals
+        self._focused_timeline.seeked.connect(self._on_focused_seeked)
+        self._timeline.viewport_recenter_requested.connect(
+            self._focused_timeline.recenter_to,
+        )
+        self._focused_timeline.view_changed.connect(self._timeline.set_viewport)
 
         # mpv signals
         # Mpv-driven timeline + mode sync is owned by PlaybackOrchestrator.
@@ -1272,6 +1302,7 @@ class MainWindow(QMainWindow):
             self._groups = []
             self._group_index = -1
             self._player.show_time(self._player._current_time)
+            self._push_playhead_to_focused(self._player._current_time)
 
     # ── Folder loading ──
 
@@ -1716,6 +1747,7 @@ class MainWindow(QMainWindow):
         if self._playback.is_playback:
             self._playback.enter_edit_mode(capture=False)
         self._player.show_time(group.representative_time)
+        self._push_playhead_to_focused(group.representative_time)
         self._player.prefetch_around(group.representative_time)
         self._gallery.select_group(index)
         self._timeline.set_time(group.representative_time)
@@ -1729,6 +1761,7 @@ class MainWindow(QMainWindow):
             if self._playback.is_playback:
                 self._playback.enter_edit_mode(capture=False)
             self._player.show_time(t)
+            self._push_playhead_to_focused(t)
             self._player.prefetch_around(t)
             self._timeline.set_time(t)
 
@@ -1844,6 +1877,7 @@ class MainWindow(QMainWindow):
             return
         self._edit.duplicate(label.label_id)
         self._player.show_time(self._player._current_time)
+        self._push_playhead_to_focused(self._player._current_time)
         self._dirty = True
         _status_msg(self, f"Duplicated \"{label.text}\"")
 
@@ -1856,6 +1890,7 @@ class MainWindow(QMainWindow):
         self._edit.retime_many(ids, start, end)
         self._dirty = True
         self._player.show_time(self._player._current_time)
+        self._push_playhead_to_focused(self._player._current_time)
         _status_msg(self, f"Synced {len(labels)} labels to {_seconds_to_time(start)} \u2192 {_seconds_to_time(end)}")
 
     def _on_delete(self) -> None:
@@ -1882,11 +1917,13 @@ class MainWindow(QMainWindow):
             if not self._groups:
                 self._group_index = -1
                 self._player.show_time(self._player._current_time)
+                self._push_playhead_to_focused(self._player._current_time)
             else:
                 next_gi = min(gi, len(self._groups) - 1)
                 self._goto_group(next_gi)
         else:
             self._player.show_time(self._player._current_time)
+            self._push_playhead_to_focused(self._player._current_time)
         count = len(selected)
         self._dirty = True
         _status_msg(self, f"Deleted {count} label{'s' if count > 1 else ''}")
@@ -1910,6 +1947,7 @@ class MainWindow(QMainWindow):
         if not self._groups:
             self._group_index = -1
             self._player.show_time(self._player._current_time)
+            self._push_playhead_to_focused(self._player._current_time)
             return
         # Advance: prefer same index (now the next group), else clamp
         next_gi = min(gi, len(self._groups) - 1)
@@ -2291,6 +2329,7 @@ class MainWindow(QMainWindow):
         self._edit.edit_text(label.label_id, display_text, rich_text)
         self._dirty = True
         self._player.show_time(self._player._current_time)
+        self._push_playhead_to_focused(self._player._current_time)
         _status_msg(self, f"Updated text to \"{label.text}\"")
 
     # ── Context menus ──
@@ -2440,6 +2479,7 @@ class MainWindow(QMainWindow):
             if new_gi >= 0:
                 self._goto_group(new_gi)
         self._player.show_time(self._player._current_time)
+        self._push_playhead_to_focused(self._player._current_time)
         self._dirty = True
         _status_msg(self, f"Created label at ({ass_x}, {ass_y})")
 
@@ -2494,6 +2534,19 @@ class MainWindow(QMainWindow):
             self._playback.enter_edit_mode(capture=False)
             self._mpv_widget.seek_absolute(seconds)
         self._player.show_time(seconds)
+        self._push_playhead_to_focused(seconds)
+
+    def _on_focused_seeked(self, seconds: float) -> None:
+        """User clicked on empty area of the focused strip — seek the player."""
+        self._player.show_time(seconds)
+        if hasattr(self, "_timeline"):
+            self._timeline.set_time(seconds)
+        self._push_playhead_to_focused(seconds)
+
+    def _push_playhead_to_focused(self, seconds: float) -> None:
+        """Push the playhead position into the focused timeline strip."""
+        if hasattr(self, "_focused_timeline"):
+            self._focused_timeline.set_playhead(seconds)
 
     def _on_timeline_step(self, delta: int) -> None:
         """Handle frame step buttons from timeline."""
@@ -2647,6 +2700,7 @@ class MainWindow(QMainWindow):
         else:
             # Fallback: drive the player widget directly (always present).
             self._player.show_time(row.start_time)
+            self._push_playhead_to_focused(row.start_time)
 
     def _delete_labels(self, labels) -> None:
         """Delete the given iterable of LabelDialogue objects.
