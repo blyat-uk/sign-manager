@@ -884,6 +884,17 @@ class MainWindow(QMainWindow):
         open_btn.clicked.connect(self._open_video)  # default action
         self._main_tb.addWidget(open_btn)
 
+        # Gallery toggle (positioned as the 2nd icon — user preference)
+        self._gallery_btn = theme.IconButton(
+            theme.Icons.gallery_toggle(),
+            tooltip=f"Toggle gallery ({shortcuts.TOGGLE_GALLERY.toString()})",
+            icon_only=True,
+        )
+        self._gallery_btn.setCheckable(True)
+        self._gallery_btn.setChecked(self._app_settings.display.gallery_visible)
+        self._gallery_btn.toggled.connect(self._on_gallery_toggled)
+        self._main_tb.addWidget(self._gallery_btn)
+
         # Save (primary)
         self._save_btn = theme.PrimaryButton(
             "Save", icon=theme.Icons.save(),
@@ -941,17 +952,7 @@ class MainWindow(QMainWindow):
 
         self._main_tb.addSeparator()
 
-        # View toggles
-        self._gallery_btn = theme.IconButton(
-            theme.Icons.gallery_toggle(),
-            tooltip=f"Toggle gallery ({shortcuts.TOGGLE_GALLERY.toString()})",
-            icon_only=True,
-        )
-        self._gallery_btn.setCheckable(True)
-        self._gallery_btn.setChecked(self._app_settings.display.gallery_visible)
-        self._gallery_btn.toggled.connect(self._on_gallery_toggled)
-        self._main_tb.addWidget(self._gallery_btn)
-
+        # View toggles (gallery toggle moved to 2nd position above)
         self._sidebar_btn = theme.IconButton(
             theme.Icons.sidebar_toggle(),
             tooltip="Toggle file sidebar",
