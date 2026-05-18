@@ -126,7 +126,7 @@ class RetimeController:
         fps = self._fps()
         ids = list(self._selected())
         if not ids:
-            return False
+            return True   # empty selection: no-op, not a parse failure
         updates = []
         for lid in ids:
             lb = self._store.state.labels[lid]
@@ -142,7 +142,7 @@ class RetimeController:
         fps = self._fps()
         ids = list(self._selected())
         if not ids:
-            return False
+            return True   # empty selection: no-op, not a parse failure
         updates = []
         for lid in ids:
             lb = self._store.state.labels[lid]
@@ -189,10 +189,17 @@ class RetimeController:
     def _clamp(
         self, start: float, end: float, fps: float,
     ) -> tuple[float, float]:
-        """Ensure end > start by at least one frame; snap both to frame."""
+        """Ensure end is at least one frame past start; snap both to frame.
+
+        When fps > 200 (so 1/fps rounds to less than one centisecond), the
+        minimum-duration step falls back to one centisecond — the finest
+        representable step at ASS file precision.
+        """
         start = snap_to_frame(max(0.0, start), fps)
         end = snap_to_frame(max(0.0, end), fps)
         min_dur = frame_to_seconds(1, fps) if fps > 0 else 0.01
+        if min_dur == 0.0:
+            min_dur = 0.01
         if end <= start:
             end = snap_to_frame(start + min_dur, fps)
             # snap_to_frame might round back down equal to start at certain fps;

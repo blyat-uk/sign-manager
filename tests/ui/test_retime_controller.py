@@ -197,3 +197,57 @@ def test_fps_zero_disables_frame_step_nudge(qapp):
     # may still pass through the clamp path. Either way: no time change.
     assert after[0] == pytest.approx(before[0], abs=0.02)
     assert after[1] == pytest.approx(before[1], abs=0.02)
+
+
+def test_clamp_does_not_hang_at_very_high_fps(qapp):
+    """Regression: at fps > 200, 1/fps rounds to 0 centiseconds; _clamp must
+    fall back to one centisecond instead of looping forever."""
+    store, _, retime = _make(fps=240.0, current=1000.0)
+    lid = next(iter(store.state.labels.keys()))
+    store.set_selection({lid})
+    retime.set_in_at_current()   # would hang without the fix
+    after = store.state.labels[lid]
+    assert after.start_time == 1000.0
+    assert after.end_time > after.start_time
+
+
+def test_apply_input_to_start_empty_selection_returns_true_no_mutation(qapp):
+    """Empty selection is a no-op (returns True) — not a parse failure."""
+    store, _, retime = _make()
+    store.set_selection(set())
+    ok = retime.apply_input_to_start("0:01:23.45")
+    assert ok is True
+    # And of course no mutations happened.
+
+
+def test_nudge_start_shifts_only_start_by_frames(qapp):
+    store, _, retime = _make(fps=30.0)
+    lid = next(iter(store.state.labels.keys()))
+    store.set_selection({lid})
+    before = store.state.labels[lid]
+    retime.nudge_start(+2)
+    after = store.state.labels[lid]
+    expected_delta = 2.0 / 30.0
+    assert after.start_time == pytest.approx(before.start_time + expected_delta, abs=0.02)
+    assert after.end_time == pytest.approx(before.end_time, abs=0.02)
+
+
+def test_nudge_end_shifts_only_end_by_frames(qapp):
+    store, _, retime = _make(fps=30.0)
+    lid = next(iter(store.state.labels.keys()))
+    store.set_selection({lid})
+    before = store.state.labels[lid]
+    retime.nudge_end(+2)
+    after = store.state.labels[lid]
+    expected_delta = 2.0 / 30.0
+    assert after.start_time == pytest.approx(before.start_time, abs=0.02)
+    assert after.end_time == pytest.approx(before.end_time + expected_delta, abs=0.02)
+
+
+def test_apply_input_to_end_absolute_updates_end(qapp):
+    store, _, retime = _make()
+    lid = next(iter(store.state.labels.keys()))
+    store.set_selection({lid})
+    ok = retime.apply_input_to_end("0:00:10.00")
+    assert ok is True
+    assert store.state.labels[lid].end_time == 10.0
