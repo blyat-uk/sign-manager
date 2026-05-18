@@ -155,7 +155,7 @@ class Icons:
     # Layout
     @classmethod
     def gallery_toggle(cls, color: str | None = None) -> QIcon:
-        return cls._i("ph.rows", color)
+        return cls._i("ph.squares-four", color)
 
     @classmethod
     def sidebar_toggle(cls, color: str | None = None) -> QIcon:
