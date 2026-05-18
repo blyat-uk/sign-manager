@@ -1225,9 +1225,9 @@ class VideoFrameWidget(QWidget):
             # the pill.
             if getattr(self, "_loading_pending", False):
                 painter.fillRect(self.rect(), QColor(0, 0, 0, int(255 * 0.08)))
-            # All visible labels
-            if self._visible_labels:
-                self._paint_labels(painter, draw_handles=True)
+            # All visible labels + any out-of-window selected ghosts.
+            # _paint_labels short-circuits internally when both lists are empty.
+            self._paint_labels(painter, draw_handles=True)
             # Opportunistic mid-gesture rebuild: if a drag is active but the
             # layer was just invalidated, rebuild it now so the NEXT paint
             # hits the fast path. The current paint still pays the full
