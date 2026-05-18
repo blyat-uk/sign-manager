@@ -545,3 +545,20 @@ def test_merge_coalesce_key_is_none(state):
         source_snapshots=tuple(snaps), merged_id=merged_id, merged_dialogue=merged_dlg,
     )
     assert m.coalesce_key is None
+
+
+def test_batch_mutation_default_coalesce_key_is_none(state):
+    from sub_label_pos.model.mutations import BatchMutation
+    lid = state.order[0]
+    b = BatchMutation([RetimeLabel(label_id=lid, new_start=0.0, new_end=1.0)])
+    assert b.coalesce_key is None
+
+
+def test_batch_mutation_with_coalesce_key_exposes_it(state):
+    from sub_label_pos.model.mutations import BatchMutation
+    lid = state.order[0]
+    b = BatchMutation(
+        [RetimeLabel(label_id=lid, new_start=0.0, new_end=1.0)],
+        coalesce_key="retime-drag:session-xyz",
+    )
+    assert b.coalesce_key == "retime-drag:session-xyz"
