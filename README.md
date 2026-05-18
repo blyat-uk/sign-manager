@@ -2,6 +2,8 @@
 
 A desktop application for visually editing label positions in ASS subtitle files. Load a video alongside its `.ass` file, then drag labels directly on the video frame to reposition them.
 
+![Editor with a video loaded, labels list on the right, gallery at the bottom, and a label selected on the canvas](assets/screenshots/01-editor.png)
+
 ## Features
 
 - Drag-and-drop label repositioning on video frames
@@ -86,6 +88,8 @@ sub-label-pos
 
 ### Opening files
 
+![Welcome screen with the recent-folders list and Open buttons](assets/screenshots/02-welcome.png)
+
 - Click the **Open** button in the toolbar (split-button menu: video file / folder / ASS only) to load a video. If a matching `.ass` file exists next to the video (same name, `.ass` extension), it loads automatically.
 - Open a folder to load all videos in a directory — the left-side file sidebar appears with per-file ready/pending status while files preload in the background.
 - Drag and drop a video file onto the window.
@@ -93,11 +97,15 @@ sub-label-pos
 
 ### Navigating labels
 
+![Labels sidebar showing grouped rows with a search filter active and the matching row highlighted](assets/screenshots/03-labels-sidebar.png)
+
 - **Right sidebar (labels list)**: every label with its `start → end` timestamp. Click any row to jump the playback to that label's start time and select it on the canvas. Labels that share identical timestamps are grouped into a single row with a `×N` badge stacking all of their texts. The search box filters labels by text. Right-click a row for **Edit text**, **Jump to time**, or **Delete**.
 - **Gallery** (bottom): thumbnail preview of label groups for visual navigation. Hidden by default on the Performance profile; toggle with the `G` shortcut or the toolbar button.
 - **Timeline**: scrub or click the chunky playhead grip; group markers along the track jump to their group when clicked.
 
 ### Editing labels
+
+![Floating toolbar above a selected label, showing style chip, duplicate/delete, size stepper, alignment, bold/italic, color swatches, outline width, and copy/paste/promote-style icons](assets/screenshots/04-label-toolbar.png)
 
 - **Click** a label on the canvas to select it. **Click again** to enter inline text editing.
 - **Drag** a label to move it. Snap guides appear when aligning with other labels.
@@ -110,6 +118,8 @@ sub-label-pos
 Press **Save** in the toolbar or use `Ctrl+S`. The Save button shows a yellow dot when there are unsaved changes; the status bar also surfaces an `unsaved` chip. The app warns about unsaved changes when switching files or closing.
 
 ### Settings (cog icon)
+
+![Preferences dialog showing the Display checkboxes, Playback hardware-decode and quality options, and the Performance/Balanced/Quality profile picker with an Auto-detect button](assets/screenshots/05-settings.png)
 
 - **Display**: toggle the gallery, file sidebar, or labels list.
 - **Playback**: HW Decode mode (auto / VAAPI / NVDEC / software) and High Quality mpv scaling.
@@ -138,14 +148,6 @@ Press **Save** in the toolbar or use `Ctrl+S`. The Save button shows a yellow do
 The application extracts individual video frames using FFmpeg rather than playing the video. Labels from the ASS subtitle file are rendered as overlays on the video frame using Qt's painting system. When you reposition a label, the `\pos()` tag in the ASS file is updated in place. The font rendering applies a correction factor to match how libass (used by players like mpv) interprets font sizes, so label positions in this editor correspond accurately to what you see during playback.
 
 The first time you launch the app it detects your machine's RAM and CPU and picks one of three performance profiles. Each profile sets sensible defaults for thumbnail extraction size, the editor frame cache, preload worker counts, and whether the gallery is shown by default. You can override the profile at any time from the Settings dialog.
-
-### Development
-
-To run the test suite (385 tests):
-
-```
-pytest
-```
 
 ## License
 
