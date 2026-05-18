@@ -13,6 +13,7 @@ A desktop application for visually editing label positions in ASS subtitle files
 - Per-label font size, alignment, bold/italic, fill / outline color, outline width
 - Duplicate, delete, and merge labels
 - Copy/paste label styles between labels; promote inline overrides into the named style
+- Frame-precise **label retiming** — Mark In / Mark Out at the current frame, absolute or relative numeric entry (`+250ms`, `-6f`, `+1.5s`), single-frame nudge, bulk shift, and direct-drag handles on a zoomed focused-timeline strip. Selection persists while scrubbing so out-of-window labels render as dimmed "ghosts" you can keep retiming.
 - Right-side **labels list** with click-to-jump timestamps, live text search, and grouping for labels that share identical timing
 - Optional thumbnail **gallery** of label groups for visual navigation (collapsible handle, toggle with `G`)
 - Folder batch mode with background preloading for fast file switching, plus a left-side file sidebar with per-file ready/pending status
@@ -121,6 +122,21 @@ sub-label-pos
 - **Right-click** a label for: edit text, duplicate, copy/paste style, sync times, merge (2-3 labels selected), delete.
 - Use the **floating toolbar** that appears above a selected label for: style preset, font size, alignment, bold/italic, fill / outline color, outline width, copy/paste/promote style.
 
+### Retiming labels
+
+<p align="center">
+  <img src="assets/screenshots/06-retime-tray.png" alt="Floating retime tray over the canvas with the bracket Mark In / Mark Out buttons, jump-to-edge buttons, Start / End numeric fields, frame nudge, Shift popover, and the zoomed focused-timeline strip below it showing drag handles on a selected label">
+</p>
+
+Selecting a label reveals a floating **retime tray** at the bottom of the canvas (it overlays — the canvas and playback timeline never shift). Two sections stacked from top to bottom:
+
+- **RETIME bar** — `[` (Mark In) and `]` (Mark Out) set the selected label's start or end to the current playhead frame. The two `←|` / `|→` buttons between them jump the player to the selected label's first or last frame so you can confirm the exact transition frame before pressing the bracket. The **Start** and **End** numeric fields accept absolute (`H:MM:SS.cc`, `M:SS.cc`, `SS.cc`) or relative (`+250ms`, `-6f`, `+1.5s`) input; press Enter to commit, Esc to revert. Frame nudge buttons `−1f` / `+1f` shift the entire selection by one frame preserving duration. **Shift…** opens a small popover for arbitrary deltas.
+- **FOCUSED strip** — a zoomed-in mini-timeline auto-fit around the selection. Drag the white grip handles on the selected marker's edges to retime by direct manipulation — the strip auto-pans if you drag near its edge, and zoom-in stops at a 4 px/frame floor so every pixel of drag is a frame or finer. Mouse-wheel zooms (centered on cursor); `Zoom −` / `Zoom +` / `Reset` buttons in the header are also available. The main timeline below shows a blue viewport rectangle indicating where the focused strip is looking; drag the rectangle to pan the focused view.
+
+The whole drag of a handle coalesces into one undo entry. Multi-select retiming works for all of the above: Mark In / Mark Out align every selected label's edge to the same point; nudge and shift apply the same delta to each label (preserving per-label durations). Relative numeric input on a multi-selection evaluates against each label's own current value.
+
+When the playhead is outside a selected label's start/end window, the label still renders on the canvas at reduced opacity ("ghost"), so you can keep retiming it while seeking to where you want it to start or end.
+
 ### Saving
 
 Press **Save** in the toolbar or use `Ctrl+S`. The Save button shows a yellow dot when there are unsaved changes; the status bar also surfaces an `unsaved` chip. The app warns about unsaved changes when switching files or closing.
@@ -150,6 +166,8 @@ Press **Save** in the toolbar or use `Ctrl+S`. The Save button shows a yellow do
 | Ctrl + B / Ctrl + I | Toggle bold / italic on selected label |
 | Ctrl + Shift + V | Paste style |
 | Delete | Delete selected labels |
+| I / O | Mark In / Mark Out (set selected label start / end to current frame) |
+| Shift + Left / Right | Shift selected labels by −1 / +1 frame (preserves duration) |
 | G | Toggle gallery |
 | L | Toggle labels list (right sidebar) |
 
