@@ -2638,7 +2638,7 @@ class MainWindow(QMainWindow):
         self._on_labels_row_jump(row)
         first_id = getattr(row.labels[0], "label_id", None)
         if first_id is not None:
-            self._store.set_selected({first_id})
+            self._store.set_selection({first_id})
 
     def _on_labels_row_jump(self, row) -> None:
         """Sidebar row jump: seek to start, without changing selection."""
