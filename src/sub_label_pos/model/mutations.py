@@ -46,14 +46,19 @@ class BatchMutation:
     inversion (each inner.invert is computed against the same ``state_before``).
     Compose batches accordingly — for compositions with intra-batch dependencies,
     build separate batches.
+
+    coalesce_key: optional; when set, the undo stack coalesces consecutive
+    batches with the same key (used by drag sessions). Defaults to ``None``
+    (no coalescing) to preserve existing behavior.
     """
 
     inner: tuple = field(default_factory=tuple)
-    coalesce_key = None    # class attribute, not a dataclass field
+    coalesce_key: str | None = None
 
-    def __init__(self, inner: Iterable):
-        # __init__ is custom so callers can pass any iterable
+    def __init__(self, inner, coalesce_key: str | None = None):
+        # __init__ is custom so callers can pass any iterable for ``inner``.
         object.__setattr__(self, "inner", tuple(inner))
+        object.__setattr__(self, "coalesce_key", coalesce_key)
 
     def apply(self, state: LabelState) -> set[LabelId]:
         affected: set[LabelId] = set()
@@ -62,7 +67,10 @@ class BatchMutation:
         return affected
 
     def invert(self, state_before: LabelState) -> "BatchMutation":
-        return BatchMutation(tuple(m.invert(state_before) for m in reversed(self.inner)))
+        return BatchMutation(
+            tuple(m.invert(state_before) for m in reversed(self.inner)),
+            coalesce_key=self.coalesce_key,
+        )
 
 
 @dataclass(frozen=True)
@@ -221,11 +229,22 @@ class PasteStyle(ChangeStyle):
 
 @dataclass(frozen=True)
 class RetimeLabel:
-    """Change a label's start and end time (seconds)."""
+    """Change a label's start and end time (seconds).
+
+    coalesce_key: by default ``f"retime:{label_id}"`` so consecutive retimes of
+    the same label within the undo-stack's coalesce window collapse. Pass
+    ``coalesce_key_override`` (e.g., a per-drag-session key) to override.
+    """
     label_id: LabelId
     new_start: float
     new_end: float
-    coalesce_key = None    # class attribute (no coalescing)
+    coalesce_key_override: str | None = None
+
+    @property
+    def coalesce_key(self) -> str:
+        if self.coalesce_key_override is not None:
+            return self.coalesce_key_override
+        return f"retime:{self.label_id}"
 
     def apply(self, state: LabelState) -> set[LabelId]:
         dlg = state.labels[self.label_id]

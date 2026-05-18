@@ -159,3 +159,47 @@ def test_merge_creates_combined_label(qapp):
     assert ids[1] not in store.state.labels
     merged = store.state.labels[merged_id]
     assert merged.text == f"{text_a} {text_b}"
+
+
+def test_retime_each_submits_batch_with_per_label_times(qapp):
+    ctrl, store = _make_controller(qapp)
+    lids = list(store.state.order)[:2]
+    ctrl.retime_each([
+        (lids[0], 10.0, 12.0),
+        (lids[1], 20.0, 22.0),
+    ])
+    assert store.state.labels[lids[0]].start_time == 10.0
+    assert store.state.labels[lids[0]].end_time == 12.0
+    assert store.state.labels[lids[1]].start_time == 20.0
+    assert store.state.labels[lids[1]].end_time == 22.0
+
+
+def test_retime_each_with_single_update_still_works(qapp):
+    ctrl, store = _make_controller(qapp)
+    lid = store.state.order[0]
+    ctrl.retime_each([(lid, 7.5, 9.5)])
+    assert store.state.labels[lid].start_time == 7.5
+    assert store.state.labels[lid].end_time == 9.5
+
+
+def test_retime_each_empty_list_is_noop(qapp):
+    ctrl, store = _make_controller(qapp)
+    before = {lid: (lb.start_time, lb.end_time) for lid, lb in store.state.labels.items()}
+    ctrl.retime_each([])
+    after = {lid: (lb.start_time, lb.end_time) for lid, lb in store.state.labels.items()}
+    assert before == after
+
+
+def test_retime_each_passes_coalesce_key_through_to_batch(qapp):
+    ctrl, store = _make_controller(qapp)
+    lids = list(store.state.order)[:2]
+    before = {lid: (store.state.labels[lid].start_time, store.state.labels[lid].end_time)
+              for lid in lids}
+    # First call
+    ctrl.retime_each([(lids[0], 1.0, 2.0), (lids[1], 1.0, 2.0)], coalesce_key="drag:sess1")
+    # Second call within 500ms with same key should coalesce in the undo stack
+    ctrl.retime_each([(lids[0], 3.0, 4.0), (lids[1], 3.0, 4.0)], coalesce_key="drag:sess1")
+    # One undo should restore both labels to their pre-first-call state.
+    store.undo()
+    for lid in lids:
+        assert (store.state.labels[lid].start_time, store.state.labels[lid].end_time) == before[lid]
