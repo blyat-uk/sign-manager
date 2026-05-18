@@ -789,11 +789,14 @@ class MainWindow(QMainWindow):
             thumb_jpeg_quality=perf.thumb_jpeg_quality,
         )
         self._timeline = TimelineWidget(groups=self._groups_model)
-        self._retime_bar = RetimeBar(self._store, self._retime, parent=self)
+        # Floating overlay tray: children of self._player so they overlay
+        # the canvas rather than taking layout space (selection toggles no
+        # longer make the canvas/timeline jump up and down).
+        self._retime_bar = RetimeBar(self._store, self._retime, parent=self._player)
         self._focused_timeline = FocusedTimeline(
             self._store, self._retime,
             fps_provider=lambda: getattr(self._player, "_fps", 0.0),
-            parent=self,
+            parent=self._player,
         )
 
         # Video stack: page 0 = mpv (playback), page 1 = editor (QPainter)
@@ -818,8 +821,9 @@ class MainWindow(QMainWindow):
         vc_layout.setContentsMargins(0, 0, 0, 0)
         vc_layout.setSpacing(0)
         vc_layout.addWidget(self._video_stack, 1)
-        vc_layout.addWidget(self._retime_bar, 0)
-        vc_layout.addWidget(self._focused_timeline, 0)
+        # RetimeBar + FocusedTimeline are NOT in this layout — they're floating
+        # children of self._player so they don't shift the canvas on toggle.
+        # _layout_floating_retime_tray() positions them at the bottom of the canvas.
         vc_layout.addWidget(self._timeline, 0)
 
         self._splitter = QSplitter(Qt.Orientation.Vertical)
@@ -1110,12 +1114,18 @@ class MainWindow(QMainWindow):
         )
         self._focused_timeline.view_changed.connect(self._timeline.set_viewport)
 
-        # When the canvas geometry shifts (e.g. RetimeBar/FocusedTimeline
-        # become visible on selection), the floating label toolbar must
+        # When the canvas geometry shifts, the floating label toolbar must
         # reposition against the new label rects. canvas_resized is emitted
         # from paintEvent AFTER _label_rects is refreshed, so the rects are
         # current by the time we read them here.
         self._player.canvas_resized.connect(self._update_toolbar_position)
+        # The floating retime tray (RetimeBar + FocusedTimeline) overlays the
+        # canvas; reposition it on any canvas resize, and again on selection
+        # change so the first appearance lands at the right coordinates.
+        self._player.canvas_resized.connect(self._layout_floating_retime_tray)
+        self._store.selection_changed.connect(
+            lambda _sel: self._layout_floating_retime_tray(),
+        )
 
         # mpv signals
         # Mpv-driven timeline + mode sync is owned by PlaybackOrchestrator.
@@ -1871,6 +1881,30 @@ class MainWindow(QMainWindow):
         rect = self._player._label_rects.get(label.line_index)
         if rect:
             self._toolbar.position_above(rect.center().x(), rect.top())
+
+    def _layout_floating_retime_tray(self) -> None:
+        """Position the floating RetimeBar + FocusedTimeline tray at the bottom
+        of the canvas. The tray overlays the canvas so selection toggles do
+        not displace the timeline below.
+
+        Called on canvas resize and on selection change (the latter so the
+        widgets are positioned the first time they become visible)."""
+        if not hasattr(self, "_focused_timeline") or not hasattr(self, "_retime_bar"):
+            return
+        canvas_w = self._player.width()
+        canvas_h = self._player.height()
+        # Resize tray children to span the canvas width.
+        rb_h = self._retime_bar.sizeHint().height()
+        ft_h = self._focused_timeline.sizeHint().height()
+        self._retime_bar.resize(canvas_w, rb_h)
+        self._focused_timeline.resize(canvas_w, ft_h)
+        # Stack from bottom up: focused timeline flush with bottom, retime bar above.
+        ft_y = canvas_h - ft_h
+        rb_y = ft_y - rb_h
+        self._retime_bar.move(0, rb_y)
+        self._focused_timeline.move(0, ft_y)
+        self._retime_bar.raise_()
+        self._focused_timeline.raise_()
 
     # ── Toolbar actions ──
 

@@ -77,18 +77,20 @@ class RetimeBar(QWidget):
         layout.addWidget(eyebrow)
         layout.addWidget(self._make_sep())
 
-        # Mark In: square-bracket-left icon (NLE convention)
+        # Mark In: square-bracket-left character (NLE convention).
+        # IconButton would strip text when icon_only=True, so we set
+        # geometry + larger font explicitly to render the bracket as a glyph.
         set_in_shortcut = shortcuts.SET_IN.toString()
         set_out_shortcut = shortcuts.SET_OUT.toString()
         self._set_in_btn = theme.IconButton(
             text="[",
             tooltip=f"Mark In — set selected label start to current frame "
                     f"({set_in_shortcut})",
-            icon_only=True,
         )
+        self._set_in_btn.setFixedSize(30, 30)
         self._set_in_btn.setStyleSheet(
             self._set_in_btn.styleSheet()
-            + " QPushButton { font-size: 20px; font-weight: 700; padding-bottom: 2px; }"
+            + " QPushButton { font-size: 20px; font-weight: 800; padding: 0; }"
         )
         self._set_in_btn.clicked.connect(self._controller.set_in_at_current)
         layout.addWidget(self._set_in_btn)
@@ -115,16 +117,16 @@ class RetimeBar(QWidget):
         self._goto_out_btn.clicked.connect(self._controller.seek_to_out)
         layout.addWidget(self._goto_out_btn)
 
-        # Mark Out: square-bracket-right icon (NLE convention)
+        # Mark Out: square-bracket-right character (NLE convention).
         self._set_out_btn = theme.IconButton(
             text="]",
             tooltip=f"Mark Out — set selected label end to current frame "
                     f"({set_out_shortcut})",
-            icon_only=True,
         )
+        self._set_out_btn.setFixedSize(30, 30)
         self._set_out_btn.setStyleSheet(
             self._set_out_btn.styleSheet()
-            + " QPushButton { font-size: 20px; font-weight: 700; padding-bottom: 2px; }"
+            + " QPushButton { font-size: 20px; font-weight: 800; padding: 0; }"
         )
         self._set_out_btn.clicked.connect(self._controller.set_out_at_current)
         layout.addWidget(self._set_out_btn)
