@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QLabel, QLineEdit, QPushButton, QInputDialog,
 )
@@ -106,6 +106,14 @@ class RetimeBar(QWidget):
                 f"font-size: 11px; font-variant-numeric: tabular-nums;"
             )
 
+        # Capture the post-styling base for the flash-invalid effect.
+        self._base_styles: dict[int, str] = {
+            id(self._start_field): self._start_field.styleSheet(),
+            id(self._end_field): self._end_field.styleSheet(),
+            id(self._shift_btn): self._shift_btn.styleSheet(),
+        }
+        self._flash_timers: dict[int, QTimer] = {}
+
         # Subscribe to store signals
         store.selection_changed.connect(self._on_selection_changed)
         store.labels_mutated.connect(self._on_labels_mutated)
@@ -185,8 +193,21 @@ class RetimeBar(QWidget):
         self._badge.setText(f"×{count}" if count >= 2 else "")
 
     def _flash_invalid(self, widget: QWidget) -> None:
-        """Briefly outline the widget in red to indicate parse failure."""
-        prior_style = widget.styleSheet()
-        widget.setStyleSheet(prior_style + f"border: 1px solid {theme.Tokens.danger};")
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(800, lambda: widget.setStyleSheet(prior_style))
+        """Briefly outline the widget in red to indicate parse failure.
+
+        Re-entrant safe: a pending flash for the same widget is cancelled, and
+        the restored style is always the captured base — never a mid-flash
+        snapshot.
+        """
+        wid = id(widget)
+        base_style = self._base_styles.get(wid, "")
+        # Cancel any pending restore for this widget.
+        existing_timer = self._flash_timers.get(wid)
+        if existing_timer is not None:
+            existing_timer.stop()
+        widget.setStyleSheet(base_style + f"border: 1px solid {theme.Tokens.danger};")
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda: widget.setStyleSheet(base_style))
+        timer.start(800)
+        self._flash_timers[wid] = timer
