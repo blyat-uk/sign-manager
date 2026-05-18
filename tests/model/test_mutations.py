@@ -268,9 +268,19 @@ def test_retime_label_invert_restores(state):
     assert state.labels[lid].end_time == before_end
 
 
-def test_retime_label_coalesce_key_is_none(state):
+def test_retime_label_coalesce_key_includes_label_id(state):
     lid = state.order[0]
-    assert RetimeLabel(label_id=lid, new_start=0.0, new_end=1.0).coalesce_key is None
+    m = RetimeLabel(label_id=lid, new_start=0.0, new_end=1.0)
+    assert m.coalesce_key == f"retime:{lid}"
+
+
+def test_retime_label_coalesce_key_override_takes_precedence(state):
+    lid = state.order[0]
+    m = RetimeLabel(
+        label_id=lid, new_start=0.0, new_end=1.0,
+        coalesce_key_override="retime-drag:abc123",
+    )
+    assert m.coalesce_key == "retime-drag:abc123"
 
 
 def test_retime_label_does_not_mutate_in_place(state):

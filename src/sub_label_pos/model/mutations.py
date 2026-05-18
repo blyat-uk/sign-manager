@@ -221,11 +221,22 @@ class PasteStyle(ChangeStyle):
 
 @dataclass(frozen=True)
 class RetimeLabel:
-    """Change a label's start and end time (seconds)."""
+    """Change a label's start and end time (seconds).
+
+    coalesce_key: by default ``f"retime:{label_id}"`` so consecutive retimes of
+    the same label within the undo-stack's coalesce window collapse. Pass
+    ``coalesce_key_override`` (e.g., a per-drag-session key) to override.
+    """
     label_id: LabelId
     new_start: float
     new_end: float
-    coalesce_key = None    # class attribute (no coalescing)
+    coalesce_key_override: str | None = None
+
+    @property
+    def coalesce_key(self) -> str:
+        if self.coalesce_key_override is not None:
+            return self.coalesce_key_override
+        return f"retime:{self.label_id}"
 
     def apply(self, state: LabelState) -> set[LabelId]:
         dlg = state.labels[self.label_id]
