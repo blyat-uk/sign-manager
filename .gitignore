@@ -6,6 +6,7 @@
 # Temporary files
 *.tmp
 *~
+.DS_Store
 
 *.bak
 # Environment files (containing secrets, API keys, credentials)
