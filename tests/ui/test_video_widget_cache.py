@@ -259,3 +259,63 @@ def test_drag_layer_invalidated_when_non_dragged_id_mutated(qapp):
     w._on_store_labels_mutated({"other"})
     assert w._drag_layer is None
     assert w._drag_layer_dragged_ids == frozenset()
+
+
+def _loaded_widget(qapp):
+    """Build a VideoFrameWidget with the sample fixture loaded into its store."""
+    from sub_label_pos.model.ass_file import AssFile
+    from sub_label_pos.ui.video_widget import VideoFrameWidget
+    fixture = Path(__file__).parent.parent / "fixtures" / "sample.ass"
+    ass = AssFile(str(fixture))
+    store = LabelStore()
+    store.load(ass, fixture)
+    fq = _FakeFrameQueue()
+    w = VideoFrameWidget(store, _FakeSvc(), frame_queue=fq, frame_cache_size=4)
+    return w, store
+
+
+def test_seek_outside_label_window_preserves_selection(qapp):
+    """Selection persists when the playhead leaves a selected label's window.
+    Previously the canvas auto-pruned selection to visible labels only; the
+    RetimeBar / focused timeline retiming flow requires the selection to
+    survive seeking outside the label's current start/end."""
+    w, store = _loaded_widget(qapp)
+    lid = store.state.order[0]
+    label = store.state.labels[lid]
+    store.set_selection({lid})
+    # Pick a time well outside this label's window.
+    outside_t = label.end_time + 100.0
+    w._update_visible_labels(outside_t)
+    assert lid in store.selected, "selection must persist across scrubbing"
+    assert label in w._ghost_labels, "out-of-window selected label should be a ghost"
+    assert label not in w._visible_labels, "out-of-window label must not be in visible list"
+
+
+def test_seek_back_into_label_window_promotes_ghost_to_visible(qapp):
+    """A ghost label returns to the visible list when the playhead re-enters
+    its window. Selection survives both transitions."""
+    w, store = _loaded_widget(qapp)
+    lid = store.state.order[0]
+    label = store.state.labels[lid]
+    store.set_selection({lid})
+    w._update_visible_labels(label.end_time + 100.0)
+    assert label in w._ghost_labels
+    # Seek back into the label's window.
+    inside_t = (label.start_time + label.end_time) / 2.0
+    w._update_visible_labels(inside_t)
+    assert label in w._visible_labels
+    assert label not in w._ghost_labels
+    assert lid in store.selected
+
+
+def test_unselected_label_outside_window_is_not_a_ghost(qapp):
+    """Only SELECTED out-of-window labels become ghosts. Unselected ones are
+    simply absent from both lists at that time."""
+    w, store = _loaded_widget(qapp)
+    lid = store.state.order[0]
+    label = store.state.labels[lid]
+    # No selection at all.
+    store.set_selection(set())
+    w._update_visible_labels(label.end_time + 100.0)
+    assert label not in w._visible_labels
+    assert label not in w._ghost_labels

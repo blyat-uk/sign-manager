@@ -237,6 +237,10 @@ class VideoFrameWidget(QWidget):
         self._ass: AssFile | None = None
         self._font_corrections: dict[tuple[str, bool, bool], float] = {}
         self._visible_labels: list[LabelDialogue] = []
+        # Selected labels whose time window does NOT include the current playhead.
+        # Rendered as dimmed "ghosts" so the user can keep them selected and
+        # retime them while seeking outside their current start/end window.
+        self._ghost_labels: list[LabelDialogue] = []
         # Per-paint scratch dict keyed by line_index, used for hit-testing
         # and handle/edit positioning between paints. Cleared and repopulated
         # each paintEvent.
@@ -647,31 +651,38 @@ class VideoFrameWidget(QWidget):
         )
 
     def _update_visible_labels(self, current_time: float):
-        """Recompute ``self._visible_labels`` from the live store state.
+        """Recompute ``self._visible_labels`` and ``self._ghost_labels`` from
+        the live store state.
 
         Labels are sourced from ``self._store.state`` (the source of truth),
         not from ``self._ass.labels`` -- store mutations don't refresh the
         AssFile's label list, so reading from state guarantees we see the
         latest LabelDialogue instances (mutations swap them in via
         dataclasses.replace).
+
+        Selection is NOT pruned when labels leave the time window. Instead,
+        out-of-window selected labels go into ``_ghost_labels`` and render as
+        dimmed outlines so the user can retime them via the RetimeBar / focused
+        timeline while seeking outside their current window.
         """
         state = self._store.state
         if not state.order:
             self._visible_labels = []
-        else:
-            visible: list[LabelDialogue] = []
-            for lid in state.order:
-                lb = state.labels[lid]
-                if lb.start_time <= current_time <= lb.end_time:
-                    visible.append(lb)
-            self._visible_labels = visible
-        # Prune selection to only visible labels. Selection is owned by the
-        # store; we ask the store to drop ids that are no longer visible.
-        visible_ids = {lb.label_id for lb in self._visible_labels if lb.label_id}
-        current = self._store.selected
-        pruned = current & visible_ids
-        if pruned != current:
-            self._store.set_selection(pruned)
+            self._ghost_labels = []
+            return
+        visible: list[LabelDialogue] = []
+        for lid in state.order:
+            lb = state.labels[lid]
+            if lb.start_time <= current_time <= lb.end_time:
+                visible.append(lb)
+        self._visible_labels = visible
+        visible_ids = {lb.label_id for lb in visible if lb.label_id}
+        selected_ids = self._store.selected
+        self._ghost_labels = [
+            state.labels[lid]
+            for lid in selected_ids
+            if lid not in visible_ids and lid in state.labels
+        ]
 
     # ── Coordinate mapping ──
 
@@ -1029,12 +1040,19 @@ class VideoFrameWidget(QWidget):
         drawn label (suppressed when building the drag layer because the
         handles should follow the dragged label live).
         """
-        if not self._visible_labels:
+        if not self._visible_labels and not self._ghost_labels:
             return
         self._label_rects.clear()
         selected_ids = self._selected_ids()
 
-        for label in self._visible_labels:
+        # Render ghosts first (bottom layer, dimmed), then visible labels on
+        # top. Both populate _label_rects so hit-testing finds either.
+        ghost_ids = {lb.label_id for lb in self._ghost_labels if lb.label_id}
+        for label in [*self._ghost_labels, *self._visible_labels]:
+            is_ghost = label.label_id in ghost_ids
+            if is_ghost:
+                painter.save()
+                painter.setOpacity(0.4)
             # Skip the label being edited inline
             if self._editing_label and label.line_index == self._editing_label.line_index:
                 continue
@@ -1131,9 +1149,13 @@ class VideoFrameWidget(QWidget):
             if rotation != 0:
                 painter.restore()
 
-            # Draw resize/rotate handles for single selection
-            if draw_handles and is_selected and len(selected_ids) == 1:
+            # Draw resize/rotate handles for single selection (ghosts never
+            # show handles — they're non-interactive at the resize level).
+            if not is_ghost and draw_handles and is_selected and len(selected_ids) == 1:
                 self._draw_handles(painter, rect, anchor, rotation)
+
+            if is_ghost:
+                painter.restore()
 
     def _build_drag_layer(self, dragged_ids: frozenset) -> None:
         """Render frame + non-dragged labels into a pixmap, ready for fast
@@ -1354,7 +1376,10 @@ class VideoFrameWidget(QWidget):
     # ── Mouse interaction ──
 
     def _hit_test(self, pos: QPointF) -> LabelDialogue | None:
-        for label in reversed(self._visible_labels):
+        # Visible labels first (they render on top, so they win on overlap);
+        # ghosts second so clicking a dimmed selected-but-out-of-window label
+        # still hits it.
+        for label in (*reversed(self._visible_labels), *reversed(self._ghost_labels)):
             rect = self._label_rects.get(label.line_index)
             if not rect:
                 continue
