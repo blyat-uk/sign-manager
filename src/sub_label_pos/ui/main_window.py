@@ -9,7 +9,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-from PyQt6.QtCore import Qt, QPointF, QRectF, QThread, pyqtSignal, QObject, QThreadPool, QRunnable, QSettings, QSize
+from PyQt6.QtCore import Qt, QPointF, QRectF, QThread, QTimer, pyqtSignal, QObject, QThreadPool, QRunnable, QSettings, QSize
 from PyQt6.QtGui import QAction, QColor, QCursor, QKeySequence, QDragEnterEvent, QDropEvent, QShortcut, QCloseEvent, QImage, QFont
 from PyQt6.QtWidgets import (
     QMainWindow,
@@ -1108,6 +1108,14 @@ class MainWindow(QMainWindow):
             self._focused_timeline.recenter_to,
         )
         self._focused_timeline.view_changed.connect(self._timeline.set_viewport)
+
+        # When the canvas geometry shifts (e.g. RetimeBar/FocusedTimeline
+        # become visible on selection), the floating label toolbar must
+        # reposition against the new label rects. Defer until the next event
+        # loop tick so the paint that refreshes _label_rects has fired.
+        self._player.canvas_resized.connect(
+            lambda: QTimer.singleShot(0, self._update_toolbar_position),
+        )
 
         # mpv signals
         # Mpv-driven timeline + mode sync is owned by PlaybackOrchestrator.

@@ -196,6 +196,8 @@ class VideoFrameWidget(QWidget):
     empty_context_menu_requested = pyqtSignal(QPointF)
     drag_started = pyqtSignal()   # emitted when move or rotate drag begins
     drag_finished = pyqtSignal()  # emitted when move or rotate drag ends
+    canvas_resized = pyqtSignal()  # emitted after resizeEvent; lets the floating
+                                   # label toolbar reposition against fresh _label_rects
 
     def __init__(
         self,
@@ -1350,6 +1352,10 @@ class VideoFrameWidget(QWidget):
         self._update_scaled_pixmap()
         self._position_loading_pill()
         self.update()
+        # Let listeners (e.g. floating label toolbar) reposition against the
+        # new geometry. Emitted AFTER pixmap rebuild so the next paint will
+        # refresh _label_rects before listeners read them.
+        self.canvas_resized.emit()
 
     def _recompute_target_max_dim(self) -> None:
         """Derive ``_target_max_dim`` from the current widget width.

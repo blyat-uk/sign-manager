@@ -16,17 +16,29 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
-    QWidget, QHBoxLayout, QLabel, QLineEdit, QPushButton, QInputDialog,
+    QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QWidget,
 )
 
+from sub_label_pos import shortcuts
 from sub_label_pos.model.ass_file import _seconds_to_time
 from sub_label_pos.ui import theme
 
 if TYPE_CHECKING:
     from sub_label_pos.model.label_store import LabelStore
     from sub_label_pos.ui.controllers.retime_controller import RetimeController
+
+
+_FIELD_QSS = (
+    f"QLineEdit {{ background: {theme.Tokens.bg_deepest};"
+    f" color: {theme.Tokens.text_primary};"
+    f" border: 1px solid {theme.Tokens.border};"
+    f" border-radius: 4px; padding: 3px 6px;"
+    f" font-family: ui-monospace, Menlo, Consolas, monospace;"
+    f" font-size: 11px; font-variant-numeric: tabular-nums; }}"
+    f"QLineEdit:focus {{ border-color: {theme.Tokens.accent}; }}"
+)
 
 
 class RetimeBar(QWidget):
@@ -42,71 +54,128 @@ class RetimeBar(QWidget):
         self._store = store
         self._controller = controller
 
-        self.setStyleSheet(f"background: {theme.Tokens.bg_deepest};")
+        # Slightly raised surface so the bar reads as a distinct tool tray
+        # separate from the video canvas above and the timeline below.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(
+            f"RetimeBar {{ background: {theme.Tokens.bg_surface};"
+            f" border-top: 1px solid {theme.Tokens.border};"
+            f" border-bottom: 1px solid {theme.Tokens.border}; }}"
+        )
+
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setContentsMargins(10, 6, 10, 6)
         layout.setSpacing(6)
 
+        # Section eyebrow label — establishes that this row is a tool group.
+        eyebrow = QLabel("RETIME")
+        eyebrow.setStyleSheet(
+            f"color: {theme.Tokens.accent}; font-size: 10px;"
+            f" font-weight: 700; letter-spacing: 1px; padding: 0 4px;"
+            f" background: transparent;"
+        )
+        layout.addWidget(eyebrow)
+        layout.addWidget(self._make_sep())
+
         # Mark In / Out
-        self._set_in_btn = QPushButton("Set In  I")
+        set_in_shortcut = shortcuts.SET_IN.toString()
+        set_out_shortcut = shortcuts.SET_OUT.toString()
+        self._set_in_btn = theme.IconButton(
+            text="Set In",
+            tooltip=f"Set selected label start to current frame ({set_in_shortcut})",
+        )
         self._set_in_btn.clicked.connect(self._controller.set_in_at_current)
         layout.addWidget(self._set_in_btn)
 
-        self._set_out_btn = QPushButton("Set Out  O")
+        self._set_out_btn = theme.IconButton(
+            text="Set Out",
+            tooltip=f"Set selected label end to current frame ({set_out_shortcut})",
+        )
         self._set_out_btn.clicked.connect(self._controller.set_out_at_current)
         layout.addWidget(self._set_out_btn)
 
+        layout.addWidget(self._make_sep())
+
         # Start field
-        layout.addWidget(QLabel("Start"))
+        start_label = QLabel("Start")
+        start_label.setStyleSheet(
+            f"color: {theme.Tokens.text_muted}; font-size: 10px;"
+            f" text-transform: uppercase; letter-spacing: 0.5px;"
+            f" background: transparent; padding: 0 2px;"
+        )
+        layout.addWidget(start_label)
         self._start_field = QLineEdit()
         self._start_field.setPlaceholderText("H:MM:SS.cc")
-        self._start_field.setFixedWidth(110)
+        self._start_field.setFixedWidth(120)
+        self._start_field.setToolTip(
+            "Start time. Accepts H:MM:SS.cc absolute or relative +250ms / -6f / "
+            "+1.5s. Press Enter to commit, Esc to revert."
+        )
         self._start_field.returnPressed.connect(self._commit_start)
         layout.addWidget(self._start_field)
 
         # End field
-        layout.addWidget(QLabel("End"))
+        end_label = QLabel("End")
+        end_label.setStyleSheet(
+            f"color: {theme.Tokens.text_muted}; font-size: 10px;"
+            f" text-transform: uppercase; letter-spacing: 0.5px;"
+            f" background: transparent; padding: 0 2px;"
+        )
+        layout.addWidget(end_label)
         self._end_field = QLineEdit()
         self._end_field.setPlaceholderText("H:MM:SS.cc")
-        self._end_field.setFixedWidth(110)
+        self._end_field.setFixedWidth(120)
+        self._end_field.setToolTip(
+            "End time. Same input syntax as Start. Press Enter to commit, Esc to revert."
+        )
         self._end_field.returnPressed.connect(self._commit_end)
         layout.addWidget(self._end_field)
 
-        # Frame nudge
-        self._minus_f_btn = QPushButton("−1f")
+        layout.addWidget(self._make_sep())
+
+        # Frame nudge (always shifts whole selection by 1 frame; preserves duration)
+        nudge_prev = shortcuts.NUDGE_BOTH_PREV.toString()
+        nudge_next = shortcuts.NUDGE_BOTH_NEXT.toString()
+        self._minus_f_btn = theme.IconButton(
+            text="−1f",
+            tooltip=f"Shift selection back by 1 frame ({nudge_prev}). "
+                    f"Disabled when no video is loaded.",
+        )
         self._minus_f_btn.clicked.connect(lambda: self._controller.nudge_both(-1))
-        self._minus_f_btn.setToolTip("Shift selection by −1 frame (requires video for frame snapping)")
         layout.addWidget(self._minus_f_btn)
 
-        self._plus_f_btn = QPushButton("+1f")
+        self._plus_f_btn = theme.IconButton(
+            text="+1f",
+            tooltip=f"Shift selection forward by 1 frame ({nudge_next}). "
+                    f"Disabled when no video is loaded.",
+        )
         self._plus_f_btn.clicked.connect(lambda: self._controller.nudge_both(+1))
-        self._plus_f_btn.setToolTip("Shift selection by +1 frame (requires video for frame snapping)")
         layout.addWidget(self._plus_f_btn)
 
-        # Shift popover
-        self._shift_btn = QPushButton("Shift…")
+        # Shift… popover (arbitrary delta in ms / s / frames)
+        self._shift_btn = theme.IconButton(
+            theme.Icons.sync_times(),
+            text="Shift…",
+            tooltip="Shift entire selection by a custom amount (e.g. +250ms, -6f, +1.5s)",
+        )
         self._shift_btn.clicked.connect(self._open_shift_popover)
         layout.addWidget(self._shift_btn)
 
-        # ×N badge
+        # ×N badge for multi-selection
         self._badge = QLabel("")
         self._badge.setStyleSheet(
-            f"color: {theme.Tokens.text_muted}; padding: 0 6px;"
+            f"color: {theme.Tokens.text_muted}; font-size: 11px;"
+            f" font-weight: 600; padding: 0 8px; background: transparent;"
         )
+        self._badge.setToolTip("Number of selected labels being retimed together")
+        self._badge.setVisible(False)
         layout.addWidget(self._badge)
 
         layout.addStretch()
 
         # Style fields with monospace + theme tokens.
         for field in (self._start_field, self._end_field):
-            field.setStyleSheet(
-                f"background: {theme.Tokens.bg_deepest};"
-                f"color: {theme.Tokens.text_primary};"
-                f"border: 1px solid {theme.Tokens.border};"
-                f"border-radius: 4px; padding: 2px 4px;"
-                f"font-family: ui-monospace, Menlo, Consolas, monospace;"
-                f"font-size: 11px; font-variant-numeric: tabular-nums;"
-            )
+            field.setStyleSheet(_FIELD_QSS)
 
         # Capture the post-styling base for the flash-invalid effect.
         self._base_styles: dict[int, str] = {
@@ -123,6 +192,18 @@ class RetimeBar(QWidget):
         # Initial state: hidden until selection appears
         self._on_selection_changed(store.selected)
         self._update_fps_dependent_state()
+
+    # --- Construction helpers ---
+
+    def _make_sep(self) -> QWidget:
+        """Vertical 1px divider matching the LabelToolbar separator style."""
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setStyleSheet(
+            f"color: {theme.Tokens.border}; max-width: 1px; min-height: 20px;"
+            f" background: transparent;"
+        )
+        return sep
 
     # --- Signal handlers ---
 
@@ -192,14 +273,22 @@ class RetimeBar(QWidget):
         ends = {round(lb.end_time, 2) for lb in labels}
         # If the field has focus, leave it alone (user is typing).
         if not self._start_field.hasFocus():
-            self._start_field.setText(_seconds_to_time(labels[0].start_time) if len(starts) == 1 else "")
+            self._start_field.setText(
+                _seconds_to_time(labels[0].start_time) if len(starts) == 1 else "",
+            )
             self._start_field.setPlaceholderText("—" if len(starts) > 1 else "H:MM:SS.cc")
         if not self._end_field.hasFocus():
-            self._end_field.setText(_seconds_to_time(labels[0].end_time) if len(ends) == 1 else "")
+            self._end_field.setText(
+                _seconds_to_time(labels[0].end_time) if len(ends) == 1 else "",
+            )
             self._end_field.setPlaceholderText("—" if len(ends) > 1 else "H:MM:SS.cc")
 
     def _refresh_badge(self, count: int) -> None:
-        self._badge.setText(f"×{count}" if count >= 2 else "")
+        if count >= 2:
+            self._badge.setText(f"×{count}")
+            self._badge.setVisible(True)
+        else:
+            self._badge.setVisible(False)
 
     def _flash_invalid(self, widget: QWidget) -> None:
         """Briefly outline the widget in red to indicate parse failure.
@@ -214,7 +303,7 @@ class RetimeBar(QWidget):
         existing_timer = self._flash_timers.get(wid)
         if existing_timer is not None:
             existing_timer.stop()
-        widget.setStyleSheet(base_style + f"border: 1px solid {theme.Tokens.danger};")
+        widget.setStyleSheet(base_style + f"QLineEdit, QPushButton {{ border: 1px solid {theme.Tokens.danger}; }}")
         timer = QTimer(self)
         timer.setSingleShot(True)
         timer.timeout.connect(lambda: widget.setStyleSheet(base_style))

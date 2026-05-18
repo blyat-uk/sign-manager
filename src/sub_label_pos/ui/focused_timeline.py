@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Literal
 
 from PyQt6.QtCore import Qt, QTimer, QRectF, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from sub_label_pos.geometry.frame_time import snap_to_frame
 from sub_label_pos.ui import theme
@@ -295,27 +295,53 @@ class FocusedTimeline(QWidget):
         self._fps_provider = fps_provider
         self._auto_fit = True
 
-        self.setStyleSheet(f"background: {theme.Tokens.bg_deepest};")
+        # Match the RetimeBar's raised surface so the two read as one tool tray.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(
+            f"FocusedTimeline {{ background: {theme.Tokens.bg_surface};"
+            f" border-bottom: 1px solid {theme.Tokens.border}; }}"
+        )
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setContentsMargins(10, 4, 10, 6)
         layout.setSpacing(2)
 
         header = QHBoxLayout()
         header.setSpacing(6)
-        self._header_label = QLabel("Focused")
+        eyebrow = QLabel("FOCUSED")
+        eyebrow.setStyleSheet(
+            f"color: {theme.Tokens.accent}; font-size: 10px;"
+            f" font-weight: 700; letter-spacing: 1px; padding: 0 4px;"
+            f" background: transparent;"
+        )
+        header.addWidget(eyebrow)
+        header.addWidget(self._make_sep())
+        self._header_label = QLabel("")
         self._header_label.setStyleSheet(
             f"color: {theme.Tokens.text_muted}; font-size: 10px;"
-            f"text-transform: uppercase; letter-spacing: 0.5px;"
+            f" text-transform: uppercase; letter-spacing: 0.5px;"
+            f" background: transparent; padding: 0 4px;"
         )
         header.addWidget(self._header_label)
-        self._zoom_out_btn = QPushButton("Zoom −")
-        self._zoom_in_btn = QPushButton("Zoom +")
-        self._reset_btn = QPushButton("Reset")
-        for btn in (self._zoom_out_btn, self._zoom_in_btn, self._reset_btn):
-            btn.setFixedHeight(20)
-            header.addWidget(btn)
         header.addStretch()
+
+        self._zoom_out_btn = theme.IconButton(
+            theme.Icons.minus(),
+            tooltip="Zoom out the focused strip (mouse wheel up also zooms out)",
+            icon_only=True,
+        )
+        self._zoom_in_btn = theme.IconButton(
+            theme.Icons.plus(),
+            tooltip="Zoom in the focused strip (mouse wheel down also zooms in). "
+                    "Stops at 4 pixels per frame.",
+            icon_only=True,
+        )
+        self._reset_btn = theme.IconButton(
+            text="Reset",
+            tooltip="Reset zoom to auto-fit the selection",
+        )
+        for btn in (self._zoom_out_btn, self._zoom_in_btn, self._reset_btn):
+            header.addWidget(btn)
         layout.addLayout(header)
 
         self._strip = _StripWidget()
@@ -388,6 +414,16 @@ class FocusedTimeline(QWidget):
         self._controller.end_drag()
 
     # --- Internal ---
+
+    def _make_sep(self) -> QWidget:
+        """Vertical 1px divider matching the RetimeBar separator style."""
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setStyleSheet(
+            f"color: {theme.Tokens.border}; max-width: 1px; min-height: 16px;"
+            f" background: transparent;"
+        )
+        return sep
 
     def _set_view(self, start: float, end: float) -> None:
         """Centralised set-view that also notifies the outer view_changed signal."""
