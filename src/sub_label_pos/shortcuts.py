@@ -42,3 +42,9 @@ TOGGLE_LABELS_SIDEBAR = QKeySequence(Qt.Key.Key_L)
 # Per-label clipboard
 DUPLICATE = QKeySequence("Ctrl+D")
 PASTE_STYLE = QKeySequence("Ctrl+Shift+V")
+
+# Retiming
+SET_IN = QKeySequence(Qt.Key.Key_I)              # bare I; Ctrl+I (Italic) still works in text inputs
+SET_OUT = QKeySequence(Qt.Key.Key_O)             # bare O
+NUDGE_BOTH_PREV = QKeySequence("Shift+Left")     # shift selection by -1 frame
+NUDGE_BOTH_NEXT = QKeySequence("Shift+Right")    # shift selection by +1 frame
