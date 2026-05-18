@@ -2,7 +2,9 @@
 
 A desktop application for visually editing label positions in ASS subtitle files. Load a video alongside its `.ass` file, then drag labels directly on the video frame to reposition them.
 
-![Editor with a video loaded, labels list on the right, gallery at the bottom, and a label selected on the canvas](assets/screenshots/01-editor.png)
+<p align="center">
+  <img src="assets/screenshots/01-editor.png" alt="Editor with a video loaded, labels list on the right, gallery at the bottom, and a label selected on the canvas">
+</p>
 
 ## Features
 
@@ -88,7 +90,9 @@ sub-label-pos
 
 ### Opening files
 
-![Welcome screen with the recent-folders list and Open buttons](assets/screenshots/02-welcome.png)
+<p align="center">
+  <img src="assets/screenshots/02-welcome.png" alt="Welcome screen with the recent-folders list and Open buttons">
+</p>
 
 - Click the **Open** button in the toolbar (split-button menu: video file / folder / ASS only) to load a video. If a matching `.ass` file exists next to the video (same name, `.ass` extension), it loads automatically.
 - Open a folder to load all videos in a directory — the left-side file sidebar appears with per-file ready/pending status while files preload in the background.
@@ -97,7 +101,9 @@ sub-label-pos
 
 ### Navigating labels
 
-![Labels sidebar showing grouped rows with a search filter active and the matching row highlighted](assets/screenshots/03-labels-sidebar.png)
+<p align="center">
+  <img src="assets/screenshots/03-labels-sidebar.png" alt="Labels sidebar showing grouped rows with a search filter active and the matching row highlighted">
+</p>
 
 - **Right sidebar (labels list)**: every label with its `start → end` timestamp. Click any row to jump the playback to that label's start time and select it on the canvas. Labels that share identical timestamps are grouped into a single row with a `×N` badge stacking all of their texts. The search box filters labels by text. Right-click a row for **Edit text**, **Jump to time**, or **Delete**.
 - **Gallery** (bottom): thumbnail preview of label groups for visual navigation. Hidden by default on the Performance profile; toggle with the `G` shortcut or the toolbar button.
@@ -105,7 +111,9 @@ sub-label-pos
 
 ### Editing labels
 
-![Floating toolbar above a selected label, showing style chip, duplicate/delete, size stepper, alignment, bold/italic, color swatches, outline width, and copy/paste/promote-style icons](assets/screenshots/04-label-toolbar.png)
+<p align="center">
+  <img src="assets/screenshots/04-label-toolbar.png" alt="Floating toolbar above a selected label, showing style chip, duplicate/delete, size stepper, alignment, bold/italic, color swatches, outline width, and copy/paste/promote-style icons">
+</p>
 
 - **Click** a label on the canvas to select it. **Click again** to enter inline text editing.
 - **Drag** a label to move it. Snap guides appear when aligning with other labels.
@@ -119,7 +127,9 @@ Press **Save** in the toolbar or use `Ctrl+S`. The Save button shows a yellow do
 
 ### Settings (cog icon)
 
-![Preferences dialog showing the Display checkboxes, Playback hardware-decode and quality options, and the Performance/Balanced/Quality profile picker with an Auto-detect button](assets/screenshots/05-settings.png)
+<p align="center">
+  <img src="assets/screenshots/05-settings.png" alt="Preferences dialog showing the Display checkboxes, Playback hardware-decode and quality options, and the Performance/Balanced/Quality profile picker with an Auto-detect button">
+</p>
 
 - **Display**: toggle the gallery, file sidebar, or labels list.
 - **Playback**: HW Decode mode (auto / VAAPI / NVDEC / software) and High Quality mpv scaling.
