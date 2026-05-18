@@ -748,7 +748,9 @@ class MainWindow(QMainWindow):
         self._labels_dock.setMinimumWidth(240)
         self._labels_dock.setMaximumWidth(400)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._labels_dock)
-        self._labels_dock.setVisible(self._app_settings.display.labels_sidebar_visible)
+        # Hidden until the editor page is active (mirrors _main_tb). The
+        # show happens in _switch_to_editor, gated on the user's preference.
+        self._labels_dock.hide()
 
         self._labels_sidebar.row_clicked.connect(self._on_labels_row_clicked)
         self._labels_sidebar.row_jump_requested.connect(self._on_labels_row_jump)
@@ -1122,6 +1124,8 @@ class MainWindow(QMainWindow):
     def _switch_to_editor(self) -> None:
         self._stacked.setCurrentIndex(1)
         self._main_tb.show()
+        if self._app_settings.display.labels_sidebar_visible:
+            self._labels_dock.show()
 
     def _load_recent_dirs(self) -> None:
         from sub_label_pos.ui.recent_dirs import migrate
