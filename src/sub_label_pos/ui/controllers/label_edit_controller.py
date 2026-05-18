@@ -161,6 +161,30 @@ class LabelEditController(QObject):
         else:
             self.submit(BatchMutation(mutations))
 
+    def retime_each(
+        self,
+        updates: list[tuple[LabelId, float, float]],
+        *,
+        coalesce_key: str | None = None,
+    ) -> None:
+        """Apply per-label (start, end) times in one batch.
+
+        Each tuple is (label_id, new_start, new_end). Unlike ``retime_many``
+        (which aligns every label to the same span), this method lets each
+        label receive its own pair. Used by shift / nudge_both / drag flows.
+
+        Pass ``coalesce_key`` to mark the batch as coalescing with consecutive
+        batches sharing the same key (used by drag sessions for one-undo-entry-
+        per-drag semantics).
+        """
+        if not updates:
+            return
+        mutations = [
+            RetimeLabel(label_id=lid, new_start=ns, new_end=ne)
+            for lid, ns, ne in updates
+        ]
+        self.submit(BatchMutation(mutations, coalesce_key=coalesce_key))
+
     # --- Structural -------------------------------------------------
 
     def duplicate(
