@@ -196,8 +196,10 @@ class VideoFrameWidget(QWidget):
     empty_context_menu_requested = pyqtSignal(QPointF)
     drag_started = pyqtSignal()   # emitted when move or rotate drag begins
     drag_finished = pyqtSignal()  # emitted when move or rotate drag ends
-    canvas_resized = pyqtSignal()  # emitted after resizeEvent; lets the floating
-                                   # label toolbar reposition against fresh _label_rects
+    canvas_resized = pyqtSignal()  # emitted from paintEvent AFTER the first paint
+                                   # following a resize, so _label_rects is already
+                                   # refreshed when listeners (e.g. floating label
+                                   # toolbar) read it
 
     def __init__(
         self,
@@ -243,6 +245,10 @@ class VideoFrameWidget(QWidget):
         # Rendered as dimmed "ghosts" so the user can keep them selected and
         # retime them while seeking outside their current start/end window.
         self._ghost_labels: list[LabelDialogue] = []
+        # Set by resizeEvent, consumed by paintEvent — the next paint will emit
+        # canvas_resized AFTER refreshing _label_rects, so listeners that
+        # reposition against rects see fresh coordinates.
+        self._pending_resize_emit: bool = False
         # Per-paint scratch dict keyed by line_index, used for hit-testing
         # and handle/edit positioning between paints. Cleared and repopulated
         # each paintEvent.
@@ -1329,6 +1335,13 @@ class VideoFrameWidget(QWidget):
 
         painter.end()
 
+        # Emit canvas_resized AFTER the post-resize paint has populated
+        # _label_rects so any listener that reads rects (e.g. the floating
+        # label toolbar) sees fresh coordinates.
+        if self._pending_resize_emit:
+            self._pending_resize_emit = False
+            self.canvas_resized.emit()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         # Cached rects depend on _frame_w/_frame_h via _font_for_label's
@@ -1352,10 +1365,10 @@ class VideoFrameWidget(QWidget):
         self._update_scaled_pixmap()
         self._position_loading_pill()
         self.update()
-        # Let listeners (e.g. floating label toolbar) reposition against the
-        # new geometry. Emitted AFTER pixmap rebuild so the next paint will
-        # refresh _label_rects before listeners read them.
-        self.canvas_resized.emit()
+        # Defer canvas_resized.emit() to the next paint so _label_rects is
+        # already refreshed when listeners read it. (Emitting here would race
+        # against the queued paint event.)
+        self._pending_resize_emit = True
 
     def _recompute_target_max_dim(self) -> None:
         """Derive ``_target_max_dim`` from the current widget width.

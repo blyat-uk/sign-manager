@@ -9,7 +9,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-from PyQt6.QtCore import Qt, QPointF, QRectF, QThread, QTimer, pyqtSignal, QObject, QThreadPool, QRunnable, QSettings, QSize
+from PyQt6.QtCore import Qt, QPointF, QRectF, QThread, pyqtSignal, QObject, QThreadPool, QRunnable, QSettings, QSize
 from PyQt6.QtGui import QAction, QColor, QCursor, QKeySequence, QDragEnterEvent, QDropEvent, QShortcut, QCloseEvent, QImage, QFont
 from PyQt6.QtWidgets import (
     QMainWindow,
@@ -650,6 +650,7 @@ class MainWindow(QMainWindow):
             self._store, self._edit,
             fps_provider=lambda: getattr(self._player, "_fps", 0.0),
             current_time_provider=lambda: getattr(self._player, "_current_time", 0.0),
+            seek_callback=self._seek_player_to,
         )
 
         self._ass: AssFile | None = None
@@ -1111,11 +1112,10 @@ class MainWindow(QMainWindow):
 
         # When the canvas geometry shifts (e.g. RetimeBar/FocusedTimeline
         # become visible on selection), the floating label toolbar must
-        # reposition against the new label rects. Defer until the next event
-        # loop tick so the paint that refreshes _label_rects has fired.
-        self._player.canvas_resized.connect(
-            lambda: QTimer.singleShot(0, self._update_toolbar_position),
-        )
+        # reposition against the new label rects. canvas_resized is emitted
+        # from paintEvent AFTER _label_rects is refreshed, so the rects are
+        # current by the time we read them here.
+        self._player.canvas_resized.connect(self._update_toolbar_position)
 
         # mpv signals
         # Mpv-driven timeline + mode sync is owned by PlaybackOrchestrator.
@@ -2546,6 +2546,12 @@ class MainWindow(QMainWindow):
 
     def _on_focused_seeked(self, seconds: float) -> None:
         """User clicked on empty area of the focused strip — seek the player."""
+        self._seek_player_to(seconds)
+
+    def _seek_player_to(self, seconds: float) -> None:
+        """Seek the editor canvas + main timeline + focused strip to a given
+        time. Used by the focused-strip click handler and by RetimeController
+        (e.g. seek_to_in / seek_to_out)."""
         self._player.show_time(seconds)
         if hasattr(self, "_timeline"):
             self._timeline.set_time(seconds)

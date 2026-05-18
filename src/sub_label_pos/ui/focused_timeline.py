@@ -295,15 +295,17 @@ class FocusedTimeline(QWidget):
         self._fps_provider = fps_provider
         self._auto_fit = True
 
-        # Match the RetimeBar's raised surface so the two read as one tool tray.
+        # Match the RetimeBar's raised surface so the two read as one tool
+        # tray. The thicker bottom border + extra bottom padding give clear
+        # visual separation from the playback timeline below.
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(
             f"FocusedTimeline {{ background: {theme.Tokens.bg_surface};"
-            f" border-bottom: 1px solid {theme.Tokens.border}; }}"
+            f" border-bottom: 2px solid {theme.Tokens.border_strong}; }}"
         )
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 4, 10, 6)
+        layout.setContentsMargins(10, 4, 10, 14)
         layout.setSpacing(2)
 
         header = QHBoxLayout()

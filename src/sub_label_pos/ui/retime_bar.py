@@ -77,19 +77,54 @@ class RetimeBar(QWidget):
         layout.addWidget(eyebrow)
         layout.addWidget(self._make_sep())
 
-        # Mark In / Out
+        # Mark In: square-bracket-left icon (NLE convention)
         set_in_shortcut = shortcuts.SET_IN.toString()
         set_out_shortcut = shortcuts.SET_OUT.toString()
         self._set_in_btn = theme.IconButton(
-            text="Set In",
-            tooltip=f"Set selected label start to current frame ({set_in_shortcut})",
+            text="[",
+            tooltip=f"Mark In — set selected label start to current frame "
+                    f"({set_in_shortcut})",
+            icon_only=True,
+        )
+        self._set_in_btn.setStyleSheet(
+            self._set_in_btn.styleSheet()
+            + " QPushButton { font-size: 20px; font-weight: 700; padding-bottom: 2px; }"
         )
         self._set_in_btn.clicked.connect(self._controller.set_in_at_current)
         layout.addWidget(self._set_in_btn)
 
+        # Go to the label's start frame — preview the exact first frame.
+        self._goto_in_btn = theme.IconButton(
+            theme.Icons.prev_group(),
+            tooltip="Jump player to the selected label's first frame "
+                    "(confirm where it appears)",
+            icon_only=True,
+        )
+        self._goto_in_btn.clicked.connect(self._controller.seek_to_in)
+        layout.addWidget(self._goto_in_btn)
+
+        layout.addSpacing(2)
+
+        # Go to the label's end frame — preview the exact last frame.
+        self._goto_out_btn = theme.IconButton(
+            theme.Icons.next_group(),
+            tooltip="Jump player to the selected label's last frame "
+                    "(confirm where it disappears)",
+            icon_only=True,
+        )
+        self._goto_out_btn.clicked.connect(self._controller.seek_to_out)
+        layout.addWidget(self._goto_out_btn)
+
+        # Mark Out: square-bracket-right icon (NLE convention)
         self._set_out_btn = theme.IconButton(
-            text="Set Out",
-            tooltip=f"Set selected label end to current frame ({set_out_shortcut})",
+            text="]",
+            tooltip=f"Mark Out — set selected label end to current frame "
+                    f"({set_out_shortcut})",
+            icon_only=True,
+        )
+        self._set_out_btn.setStyleSheet(
+            self._set_out_btn.styleSheet()
+            + " QPushButton { font-size: 20px; font-weight: 700; padding-bottom: 2px; }"
         )
         self._set_out_btn.clicked.connect(self._controller.set_out_at_current)
         layout.addWidget(self._set_out_btn)

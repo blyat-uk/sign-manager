@@ -251,3 +251,54 @@ def test_apply_input_to_end_absolute_updates_end(qapp):
     ok = retime.apply_input_to_end("0:00:10.00")
     assert ok is True
     assert store.state.labels[lid].end_time == 10.0
+
+
+def _make_with_seek(fps=30.0, current=10.0):
+    """Variant that captures seek calls into a list for assertion."""
+    ass = AssFile(str(FIXTURE))
+    store = LabelStore()
+    store.load(ass, FIXTURE)
+    edit = LabelEditController(store)
+    seeks: list[float] = []
+    retime = RetimeController(
+        store, edit,
+        fps_provider=lambda: fps,
+        current_time_provider=lambda: current,
+        seek_callback=seeks.append,
+    )
+    return store, retime, seeks
+
+
+def test_seek_to_in_jumps_player_to_selection_earliest_start(qapp):
+    store, retime, seeks = _make_with_seek()
+    lids = list(store.state.order)[:2]
+    store.set_selection(set(lids))
+    expected = min(store.state.labels[lid].start_time for lid in lids)
+    retime.seek_to_in()
+    assert seeks == [expected]
+
+
+def test_seek_to_out_jumps_player_to_selection_latest_end(qapp):
+    store, retime, seeks = _make_with_seek()
+    lids = list(store.state.order)[:2]
+    store.set_selection(set(lids))
+    expected = max(store.state.labels[lid].end_time for lid in lids)
+    retime.seek_to_out()
+    assert seeks == [expected]
+
+
+def test_seek_to_in_with_empty_selection_is_noop(qapp):
+    store, retime, seeks = _make_with_seek()
+    store.set_selection(set())
+    retime.seek_to_in()
+    retime.seek_to_out()
+    assert seeks == []
+
+
+def test_seek_to_in_when_no_callback_is_safe_noop(qapp):
+    store, _, retime = _make()   # default constructor — no seek_callback
+    lid = store.state.order[0]
+    store.set_selection({lid})
+    # Should not raise even without a callback.
+    retime.seek_to_in()
+    retime.seek_to_out()

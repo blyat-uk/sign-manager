@@ -39,11 +39,13 @@ class RetimeController:
         *,
         fps_provider: Callable[[], float],
         current_time_provider: Callable[[], float],
+        seek_callback: Callable[[float], None] | None = None,
     ) -> None:
         self._store = store
         self._edit = edit
         self._fps = fps_provider
         self._now = current_time_provider
+        self._seek = seek_callback or (lambda _t: None)
         self._drag_session: str | None = None
         self._drag_edge: Literal["start", "end"] | None = None
 
@@ -54,6 +56,28 @@ class RetimeController:
 
     def set_out_at_current(self) -> None:
         self.set_out_to(self._now())
+
+    # --- Seek the player to the in / out edge of the selection ---
+
+    def seek_to_in(self) -> None:
+        """Seek the player to the earliest start_time across the selection.
+
+        Useful for confirming the label's first frame is exactly where the
+        user wants it to appear."""
+        labels = self._selected_label_dialogues()
+        if not labels:
+            return
+        self._seek(min(lb.start_time for lb in labels))
+
+    def seek_to_out(self) -> None:
+        """Seek the player to the latest end_time across the selection.
+
+        Useful for confirming the label's last frame is exactly where the
+        user wants it to disappear."""
+        labels = self._selected_label_dialogues()
+        if not labels:
+            return
+        self._seek(max(lb.end_time for lb in labels))
 
     # --- Explicit set ---
 
@@ -191,6 +215,15 @@ class RetimeController:
 
     def _selected(self) -> set[LabelId]:
         return set(self._store.selected)
+
+    def _selected_label_dialogues(self) -> list:
+        """Return LabelDialogue instances for currently-selected labels that
+        still exist in the store. Used by seek_to_in / seek_to_out."""
+        return [
+            self._store.state.labels[lid]
+            for lid in self._store.selected
+            if lid in self._store.state.labels
+        ]
 
     def _clamp(
         self, start: float, end: float, fps: float,
