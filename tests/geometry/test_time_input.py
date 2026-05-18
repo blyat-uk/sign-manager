@@ -2,7 +2,7 @@
 
 import pytest
 
-from sub_label_pos.geometry.time_input import parse_time_input
+from sub_label_pos.geometry.time_input import parse_time_input, parse_relative_delta
 
 
 # --- Absolute forms ---
@@ -114,3 +114,32 @@ def test_fps_zero_skips_frame_snap_but_keeps_centisecond():
 def test_relative_frames_at_fps_zero_returns_current():
     # +6f with no fps = 0 frames of advancement
     assert parse_time_input("+6f", current=10.0, fps=0.0) == 10.0
+
+
+# --- parse_relative_delta ---
+
+def test_parse_relative_delta_positive_ms():
+    assert parse_relative_delta("+250ms", fps=30.0) == 0.25
+
+
+def test_parse_relative_delta_negative_seconds():
+    assert parse_relative_delta("-1.5s", fps=30.0) == -1.5
+
+
+def test_parse_relative_delta_negative_frames():
+    # -6 frames at 30fps = -0.2s
+    assert parse_relative_delta("-6f", fps=30.0) == -0.2
+
+
+def test_parse_relative_delta_frames_without_fps_returns_none():
+    assert parse_relative_delta("+6f", fps=0.0) is None
+
+
+def test_parse_relative_delta_absolute_input_returns_none():
+    assert parse_relative_delta("83.45", fps=30.0) is None
+
+
+def test_parse_relative_delta_garbage_returns_none():
+    assert parse_relative_delta("", fps=30.0) is None
+    assert parse_relative_delta("+5x", fps=30.0) is None
+    assert parse_relative_delta("hello", fps=30.0) is None

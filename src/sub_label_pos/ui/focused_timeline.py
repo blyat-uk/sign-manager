@@ -23,7 +23,6 @@ from sub_label_pos.ui import theme
 
 if TYPE_CHECKING:
     from sub_label_pos.model.label_store import LabelStore
-    from sub_label_pos.model.types import LabelId
     from sub_label_pos.ui.controllers.retime_controller import RetimeController
 
 

@@ -75,10 +75,12 @@ class RetimeBar(QWidget):
         # Frame nudge
         self._minus_f_btn = QPushButton("−1f")
         self._minus_f_btn.clicked.connect(lambda: self._controller.nudge_both(-1))
+        self._minus_f_btn.setToolTip("Shift selection by −1 frame (requires video for frame snapping)")
         layout.addWidget(self._minus_f_btn)
 
         self._plus_f_btn = QPushButton("+1f")
         self._plus_f_btn.clicked.connect(lambda: self._controller.nudge_both(+1))
+        self._plus_f_btn.setToolTip("Shift selection by +1 frame (requires video for frame snapping)")
         layout.addWidget(self._plus_f_btn)
 
         # Shift popover
@@ -120,6 +122,7 @@ class RetimeBar(QWidget):
 
         # Initial state: hidden until selection appears
         self._on_selection_changed(store.selected)
+        self._update_fps_dependent_state()
 
     # --- Signal handlers ---
 
@@ -130,10 +133,20 @@ class RetimeBar(QWidget):
         self.setVisible(True)
         self._refresh_fields()
         self._refresh_badge(len(selected))
+        self._update_fps_dependent_state()
 
     def _on_labels_mutated(self, changed: set) -> None:
         if any(lid in changed for lid in self._store.selected):
             self._refresh_fields()
+
+    def _update_fps_dependent_state(self) -> None:
+        try:
+            fps = self._controller.fps()
+        except AttributeError:
+            fps = 0.0
+        enabled = fps > 0
+        self._minus_f_btn.setEnabled(enabled)
+        self._plus_f_btn.setEnabled(enabled)
 
     # --- Field commit handlers ---
 
@@ -158,14 +171,10 @@ class RetimeBar(QWidget):
         )
         if not ok or not text.strip():
             return
-        from sub_label_pos.geometry.time_input import parse_time_input
-        # Evaluate the shift expression with current=0 so it returns the absolute delta.
-        # We feed the parser a relative input; current=0 means "treat the +/- as the delta".
-        delta = parse_time_input(text, current=0.0, fps=0.0)
+        from sub_label_pos.geometry.time_input import parse_relative_delta
+        # Use the real fps so '+6f' / '-6f' compute correctly.
+        delta = parse_relative_delta(text, fps=self._controller.fps())
         if delta is None:
-            # parse_time_input with fps=0 won't compute +Nf; re-try with a real fps.
-            # For shifts the controller does its own frame-nudge logic via `+Nf`,
-            # but since we want a clean delta, the user can use ms or s units.
             self._flash_invalid(self._shift_btn)
             return
         self._controller.shift(delta)

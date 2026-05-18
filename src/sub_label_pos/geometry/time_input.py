@@ -78,6 +78,46 @@ def parse_time_input(text: str, *, current: float, fps: float) -> float | None:
     return None
 
 
+def parse_relative_delta(text: str, *, fps: float) -> float | None:
+    """Parse a relative time delta (e.g., '+250ms', '-6f', '+1.5s') into signed seconds.
+
+    Unlike ``parse_time_input``, this never clamps to zero — the returned delta
+    can be negative. Returns ``None`` if the text is not a valid relative form
+    (anything not starting with '+' or '-', or with an unknown unit).
+
+    The result is rounded to centisecond precision; frame units (``f``) require
+    ``fps > 0`` and otherwise return ``None`` (so callers can show a meaningful
+    error instead of silently producing a 0-second delta).
+    """
+    if text is None:
+        return None
+    s = text.strip()
+    if not s or s[0] not in "+-":
+        return None
+    m = _REL_RE.match(s)
+    if not m:
+        return None
+    sign, num_str, unit = m.group(1), m.group(2), m.group(3).lower()
+    try:
+        value = float(num_str)
+    except ValueError:
+        return None
+    if unit == "ms":
+        delta = value / 1000.0
+    elif unit == "s":
+        delta = value
+    elif unit == "f":
+        if fps <= 0:
+            return None
+        delta = value / fps
+    else:
+        return None
+    if sign == "-":
+        delta = -delta
+    # Round to centisecond — same precision granularity as ASS storage.
+    return round(delta, 2)
+
+
 def _absolute_from_hms(m: re.Match) -> float:
     h, mm, ss = int(m.group(1)), int(m.group(2)), int(m.group(3))
     cc = _cc_from_group(m.group(4))

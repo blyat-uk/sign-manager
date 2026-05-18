@@ -181,6 +181,12 @@ class RetimeController:
         self._drag_session = None
         self._drag_edge = None
 
+    # --- Public accessors for the UI ---
+
+    def fps(self) -> float:
+        """Current video fps (0.0 if no video loaded)."""
+        return self._fps()
+
     # --- Internal helpers ---
 
     def _selected(self) -> set[LabelId]:
