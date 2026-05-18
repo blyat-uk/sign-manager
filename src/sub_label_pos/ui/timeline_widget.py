@@ -20,13 +20,16 @@ class _TrackWidget(QWidget):
 
     seeked = pyqtSignal(float)  # emitted with seconds when user clicks/drags
     group_clicked = pyqtSignal(int)  # emitted with group index when a marker is clicked
+    viewport_recenter_requested = pyqtSignal(float)  # emitted when user wants to move the focused-strip viewport
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self._duration: float = 0.0
         self._position: float = 0.0  # current position in seconds
         self._group_ranges: list[tuple[float, float]] = []  # (start, end) in seconds
+        self._viewport: tuple[float, float] | None = None   # (start_s, end_s) of focused strip
         self._dragging = False
+        self._dragging_viewport = False
         self.setMinimumHeight(24)
         self.setMaximumHeight(24)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -41,6 +44,15 @@ class _TrackWidget(QWidget):
 
     def set_group_ranges(self, ranges: list[tuple[float, float]]) -> None:
         self._group_ranges = ranges
+        self.update()
+
+    def set_viewport(self, start_s: float | None, end_s: float | None) -> None:
+        """Paint a blue rectangle showing the focused-strip's window.
+        Pass (None, None) to hide."""
+        if start_s is None or end_s is None:
+            self._viewport = None
+        else:
+            self._viewport = (max(0.0, start_s), max(0.0, end_s))
         self.update()
 
     def _time_to_x(self, seconds: float) -> float:
@@ -92,6 +104,18 @@ class _TrackWidget(QWidget):
             p.setBrush(QColor(180, 200, 220, 90))
             p.drawRoundedRect(QRectF(start_x, track_y, marker_w, 8), 2, 2)
 
+        # Focused-strip viewport rectangle (drawn between group markers and playhead)
+        if self._viewport and self._duration > 0:
+            vs, ve = self._viewport
+            x1 = (vs / self._duration) * w
+            x2 = (ve / self._duration) * w
+            rect_w = max(2.0, x2 - x1)
+            p.setPen(QPen(QColor(theme.Tokens.accent), 1))
+            fill = QColor(theme.Tokens.accent)
+            fill.setAlpha(50)
+            p.setBrush(fill)
+            p.drawRoundedRect(QRectF(x1, track_y - 2, rect_w, 12), 3, 3)
+
         # Playhead — chunky white circle + glow
         if self._duration > 0:
             ph_x = (self._position / self._duration) * w
@@ -123,6 +147,14 @@ class _TrackWidget(QWidget):
     def mousePressEvent(self, event) -> None:
         if event and event.button() == Qt.MouseButton.LeftButton:
             x = event.position().x()
+            # Viewport rectangle drag — capture before group / track hit tests.
+            if self._viewport and self._duration > 0:
+                vs, ve = self._viewport
+                x1 = self._time_to_x(vs)
+                x2 = self._time_to_x(ve)
+                if x1 <= x <= x2:
+                    self._dragging_viewport = True
+                    return
             gi = self._hit_group(x)
             if gi >= 0:
                 self.group_clicked.emit(gi)
@@ -132,9 +164,17 @@ class _TrackWidget(QWidget):
             self._position = t
             self.update()
             self.seeked.emit(t)
+            # Also recenter the focused viewport on this click point.
+            self.viewport_recenter_requested.emit(t)
 
     def mouseMoveEvent(self, event) -> None:
-        if event and self._dragging:
+        if not event:
+            return
+        if self._dragging_viewport and self._viewport is not None:
+            t = self._x_to_time(event.position().x())
+            self.viewport_recenter_requested.emit(t)
+            return
+        if self._dragging:
             t = self._x_to_time(event.position().x())
             self._position = t
             self.update()
@@ -143,6 +183,7 @@ class _TrackWidget(QWidget):
     def mouseReleaseEvent(self, event) -> None:
         if event and event.button() == Qt.MouseButton.LeftButton:
             self._dragging = False
+            self._dragging_viewport = False
 
 
 class TimelineWidget(QWidget):
@@ -242,6 +283,14 @@ class TimelineWidget(QWidget):
         self._duration = duration
         self._track.set_duration(duration)
         self._update_time_label(self._track._position)
+
+    def set_viewport(self, start_s: float | None, end_s: float | None) -> None:
+        """Show / hide the focused-strip viewport rectangle on the overview track."""
+        self._track.set_viewport(start_s, end_s)
+
+    @property
+    def viewport_recenter_requested(self):
+        return self._track.viewport_recenter_requested
 
     def _on_groups_changed(self, _changed_ids: set) -> None:
         """Repaint group markers from the model."""
