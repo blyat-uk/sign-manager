@@ -1824,6 +1824,7 @@ class MainWindow(QMainWindow):
     def _on_group_selected(self, index: int) -> None:
         self._group_index = index
         self._playback_from_group = True
+        self._player.clear_selection()
         if 0 <= index < len(self._groups):
             t = self._groups[index].representative_time
             # If in playback mode, switch to edit mode
