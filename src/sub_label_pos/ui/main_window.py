@@ -1081,6 +1081,7 @@ class MainWindow(QMainWindow):
         # Gallery signals
         self._gallery.group_selected.connect(self._on_group_selected)
         self._gallery.group_right_clicked.connect(self._on_gallery_context_menu)
+        self._gallery.group_delete_clicked.connect(self._delete_group)
 
         # Keep the legacy ``self._groups`` mirror in sync with the model.
         # MainWindow still indexes into ``self._groups`` from many places

@@ -607,6 +607,7 @@ class GalleryThumbnail(QWidget):
 class GalleryPanel(QWidget):
     group_selected = pyqtSignal(int)
     group_right_clicked = pyqtSignal(int)  # index
+    group_delete_clicked = pyqtSignal(int)  # index
 
     def __init__(
         self,
@@ -774,6 +775,7 @@ class GalleryPanel(QWidget):
             thumb = GalleryThumbnail(i, texts, _format_time(earliest))
             thumb.clicked.connect(self._on_thumb_clicked)
             thumb.right_clicked.connect(self._on_thumb_right_clicked)
+            thumb.delete_clicked.connect(self._on_thumb_delete_clicked)
             self._thumbnails.append(thumb)
             self._hlayout.insertWidget(self._hlayout.count() - 1, thumb)
 
@@ -839,6 +841,9 @@ class GalleryPanel(QWidget):
 
     def _on_thumb_right_clicked(self, index: int):
         self.group_right_clicked.emit(index)
+
+    def _on_thumb_delete_clicked(self, index: int):
+        self.group_delete_clicked.emit(index)
 
     def _start_thumbnail_loading(self, skip_indices: set[int] | None = None):
         if not self._ass or not self._video_path:
