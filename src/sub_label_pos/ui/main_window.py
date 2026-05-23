@@ -136,6 +136,7 @@ class _RichFilePreloadTask(QRunnable):
         video_service: VideoService,
         *,
         generate_thumbnails: bool = True,
+        subs_dir: Path | None = None,
     ) -> None:
         super().__init__()
         self.signals = _RichPreloadSignals()
@@ -147,6 +148,7 @@ class _RichFilePreloadTask(QRunnable):
         # hidden — preloaded QImage thumbnails would otherwise be retained
         # in MainWindow._preloaded for the lifetime of the folder.
         self._gen_thumbs = generate_thumbnails
+        self._subs_dir = subs_dir
 
     def cancel(self) -> None:
         self._cancelled = True
@@ -176,15 +178,9 @@ class _RichFilePreloadTask(QRunnable):
 
             # --- Locate a matching .ass sidecar ---
             ass_file: AssFile | None = None
-            exact = video_path.with_suffix(".ass")
-            if exact.is_file():
-                ass_file = AssFile(str(exact))
-            else:
-                candidates = sorted(
-                    video_path.parent.glob(f"{glob.escape(video_path.stem)}.*.ass")
-                )
-                if candidates:
-                    ass_file = AssFile(str(candidates[0]))
+            ass_path = FileLoader.find_ass_sidecar(video_path, subs_dir=self._subs_dir)
+            if ass_path is not None:
+                ass_file = AssFile(str(ass_path))
 
             # --- Label groups + per-group thumbnails ---
             groups: list[LabelGroup] = []
@@ -253,6 +249,7 @@ class FolderPreloadWorker(QObject):
         workers: int | None = None,
         ring: int = 0,
         generate_thumbnails: bool = True,
+        subs_dir: Path | None = None,
     ):
         super().__init__()
         self._file_paths = file_paths
@@ -267,6 +264,7 @@ class FolderPreloadWorker(QObject):
         self._queued: set[int] = set()
         self._started = False
         self._gen_thumbs = generate_thumbnails
+        self._subs_dir = subs_dir
 
     def _compute_ring_indices(self, active: int) -> set[int]:
         """Return the set of file indices that should be preloaded for ``active``.
@@ -297,6 +295,7 @@ class FolderPreloadWorker(QObject):
             task = _RichFilePreloadTask(
                 path, self._video_service,
                 generate_thumbnails=self._gen_thumbs,
+                subs_dir=self._subs_dir,
             )
             task.signals.file_ready.connect(self.file_ready)
             task.signals.finished.connect(self._on_task_finished)
