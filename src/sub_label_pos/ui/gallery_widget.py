@@ -5,7 +5,7 @@ import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QRectF, pyqtSignal, QObject, QThread
+from PyQt6.QtCore import Qt, QRectF, QSize, pyqtSignal, QObject, QThread
 from PyQt6.QtGui import QPixmap, QImage, QPainter, QColor, QFont, QFontMetricsF, QPen, QRawFont
 from PyQt6.QtWidgets import (
     QWidget,
@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QVBoxLayout,
     QLabel,
+    QPushButton,
     QSizePolicy,
 )
 
@@ -449,6 +450,7 @@ class GalleryHandle(QWidget):
 class GalleryThumbnail(QWidget):
     clicked = pyqtSignal(int)
     right_clicked = pyqtSignal(int)
+    delete_clicked = pyqtSignal(int)
 
     def __init__(self, index: int, label_texts: list[str], time_str: str, parent=None):
         super().__init__(parent)
@@ -494,6 +496,43 @@ class GalleryThumbnail(QWidget):
             f"font-size: 10px; background: transparent;"
         )
         layout.addWidget(self._time_label)
+
+        # Hover-only trash button overlaid on the image's top-right corner.
+        # Parent is self (not _image_label) so the button can float above
+        # without being clipped by the QLabel's geometry.
+        self._delete_btn = QPushButton(self)
+        self._delete_btn.setIcon(theme.Icons.delete(color=theme.Tokens.danger))
+        self._delete_btn.setIconSize(QSize(14, 14))
+        self._delete_btn.setFixedSize(22, 22)
+        self._delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._delete_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._delete_btn.setToolTip("Delete")
+        self._delete_btn.setStyleSheet(
+            "QPushButton {"
+            "  background: rgba(15, 17, 20, 0.7);"
+            "  border: none;"
+            "  border-radius: 6px;"
+            "}"
+            "QPushButton:hover {"
+            "  background: rgba(31, 34, 38, 0.85);"
+            "}"
+            "QPushButton:pressed {"
+            "  background: rgba(15, 17, 20, 0.9);"
+            "}"
+        )
+        self._delete_btn.clicked.connect(
+            lambda: self.delete_clicked.emit(self._index)
+        )
+        self._delete_btn.hide()
+        self._position_delete_btn()
+
+    def _position_delete_btn(self) -> None:
+        """Place the delete button at the top-right corner of the image area."""
+        img_geom = self._image_label.geometry()
+        x = img_geom.right() - 6 - self._delete_btn.width()
+        y = img_geom.top() + 6
+        self._delete_btn.move(x, y)
+        self._delete_btn.raise_()
 
     def update_texts(self, label_texts: list[str]) -> None:
         combined = ", ".join(label_texts)
@@ -551,6 +590,18 @@ class GalleryThumbnail(QWidget):
             event.accept()
         else:
             super().mousePressEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_delete_btn()
+
+    def enterEvent(self, event):
+        self._delete_btn.show()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._delete_btn.hide()
+        super().leaveEvent(event)
 
 
 class GalleryPanel(QWidget):
