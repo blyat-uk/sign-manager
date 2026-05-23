@@ -1222,13 +1222,13 @@ class MainWindow(QMainWindow):
     # ── File loading ──
 
     def _open_video(self) -> None:
-        self._subs_dir = None
         path, _ = QFileDialog.getOpenFileName(
             self, "Open Video", "", "Video Files (*.mkv *.mp4 *.avi *.webm);;All (*)"
         )
         if path:
             self._switch_to_editor()
             self._add_recent_dir(str(Path(path).parent))
+            self._subs_dir = None
             self._load_video(path)
 
     def _load_video(self, path: str, suppress_resize: bool = False) -> None:
@@ -1339,6 +1339,22 @@ class MainWindow(QMainWindow):
         self._cancel_folder_preload()
         self._subs_dir = None
         folder_path = Path(folder)
+
+        # Bail early if the folder has no video files at all — preserves the
+        # pre-existing "No Videos" experience for empty folders, separately
+        # from the subs-folder-missing case which only applies when videos
+        # exist.
+        has_any_video = any(
+            p.is_file() and p.suffix.lower() in _VIDEO_EXTS
+            for p in folder_path.iterdir()
+        )
+        if not has_any_video:
+            QMessageBox.information(
+                self,
+                "No Videos",
+                "No video files with matching .ass subtitle files containing labels found in the selected folder.",
+            )
+            return
 
         def _scan(subs_dir: Path | None) -> list[str]:
             def _has_labels(video: Path) -> bool:
@@ -1842,7 +1858,6 @@ class MainWindow(QMainWindow):
         event.ignore()
 
     def dropEvent(self, event: QDropEvent | None) -> None:  # type: ignore[override]
-        self._subs_dir = None
         if not event:
             return
         mime = event.mimeData()
@@ -1853,6 +1868,7 @@ class MainWindow(QMainWindow):
                     if Path(path).suffix.lower() in _VIDEO_EXTS:
                         self._switch_to_editor()
                         self._add_recent_dir(str(Path(path).parent))
+                        self._subs_dir = None
                         self._load_video(path)
                         event.acceptProposedAction()
                         return
