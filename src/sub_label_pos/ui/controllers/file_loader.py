@@ -72,18 +72,27 @@ class FileLoader(QObject):
         self._pool.waitForDone(wait_ms)
 
     @staticmethod
-    def find_ass_sidecar(video_path: Path) -> Path | None:
+    def find_ass_sidecar(video_path: Path, subs_dir: Path | None = None) -> Path | None:
         """Return the path to a sidecar .ass file if present, else None.
 
-        Looks for ``<stem>.ass`` first, then falls back to the first
-        ``<stem>.*.ass`` match (mirrors the legacy MainWindow heuristic for
-        language-suffixed sidecars like ``movie.en.ass``).
+        When ``subs_dir`` is ``None``, looks in ``video_path.parent`` (legacy
+        behaviour). When supplied, looks in ``subs_dir`` instead — useful when
+        the user keeps subtitles in a different folder from the videos. Stem
+        matching is unchanged: ``<stem>.ass`` first, then the first
+        ``<stem>.*.ass`` match (mirrors the language-suffixed sidecar
+        heuristic like ``movie.en.ass``).
+
+        A non-existent or unreadable ``subs_dir`` yields ``None`` rather than
+        raising — callers treat "no sidecar" as a benign result.
         """
-        exact = video_path.with_suffix(".ass")
+        search_dir = subs_dir if subs_dir is not None else video_path.parent
+        if not search_dir.is_dir():
+            return None
+        exact = search_dir / f"{video_path.stem}.ass"
         if exact.is_file():
             return exact
         candidates = sorted(
-            video_path.parent.glob(f"{glob.escape(video_path.stem)}.*.ass")
+            search_dir.glob(f"{glob.escape(video_path.stem)}.*.ass")
         )
         return candidates[0] if candidates else None
 

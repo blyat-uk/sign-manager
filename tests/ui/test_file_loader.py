@@ -129,3 +129,54 @@ def test_load_video_with_real_ass_sidecar(qapp, tmp_path):
     pair = received[0]
     assert pair.ass is not None
     assert pair.ass_path == ass_path
+
+
+def test_find_ass_sidecar_uses_subs_dir_when_provided(qapp, tmp_path):
+    """When subs_dir is given, look in that directory using the video's stem."""
+    videos = tmp_path / "videos"
+    subs = tmp_path / "subs"
+    videos.mkdir()
+    subs.mkdir()
+    video = videos / "show_s01e01.mkv"
+    video.touch()
+    # No sidecar next to the video.
+    assert FileLoader.find_ass_sidecar(video) is None
+    # Sidecar lives in the subs dir.
+    ass = subs / "show_s01e01.ass"
+    ass.write_text("[Script Info]\n", encoding="utf-8")
+    assert FileLoader.find_ass_sidecar(video, subs_dir=subs) == ass
+
+
+def test_find_ass_sidecar_subs_dir_picks_language_suffixed(qapp, tmp_path):
+    """Language-suffixed sidecars in subs_dir are matched, same as in legacy dir."""
+    videos = tmp_path / "videos"
+    subs = tmp_path / "subs"
+    videos.mkdir()
+    subs.mkdir()
+    video = videos / "movie.mp4"
+    video.touch()
+    suffixed = subs / "movie.en.ass"
+    suffixed.write_text("[Script Info]\n", encoding="utf-8")
+    assert FileLoader.find_ass_sidecar(video, subs_dir=subs) == suffixed
+
+
+def test_find_ass_sidecar_subs_dir_overrides_local_sidecar(qapp, tmp_path):
+    """The subs_dir override is explicit: a sidecar next to the video is ignored."""
+    videos = tmp_path / "videos"
+    subs = tmp_path / "subs"
+    videos.mkdir()
+    subs.mkdir()
+    video = videos / "movie.mp4"
+    video.touch()
+    # Sidecar next to the video — would be picked up without subs_dir.
+    (videos / "movie.ass").write_text("[Script Info]\n", encoding="utf-8")
+    # Empty subs_dir.
+    assert FileLoader.find_ass_sidecar(video, subs_dir=subs) is None
+
+
+def test_find_ass_sidecar_subs_dir_missing_returns_none(qapp, tmp_path):
+    """A non-existent subs_dir returns None rather than raising."""
+    video = tmp_path / "video.mkv"
+    video.touch()
+    missing = tmp_path / "does_not_exist"
+    assert FileLoader.find_ass_sidecar(video, subs_dir=missing) is None
