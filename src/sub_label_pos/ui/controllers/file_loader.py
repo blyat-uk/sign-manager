@@ -58,14 +58,21 @@ class FileLoader(QObject):
         self._pool = QThreadPool()
         self._pool.setMaxThreadCount(1)  # one load at a time
 
-    def load_video(self, video_path: Path | str) -> None:
+    def load_video(
+        self,
+        video_path: Path | str,
+        subs_dir: Path | None = None,
+    ) -> None:
         """Initiate a load on a worker thread.
 
         Accepts ``str`` for convenience (most call sites already carry the
         path as a string); it's normalised to ``Path`` for the result bundle.
+        ``subs_dir`` is forwarded to :meth:`find_ass_sidecar` — when supplied,
+        the sidecar is resolved from that directory rather than from the
+        video's own folder.
         """
         path = Path(video_path) if not isinstance(video_path, Path) else video_path
-        self._pool.start(_LoadTask(path, self._svc, self))
+        self._pool.start(_LoadTask(path, self._svc, self, subs_dir=subs_dir))
 
     def shutdown(self, wait_ms: int = 2000) -> None:
         self._pool.clear()
@@ -98,11 +105,18 @@ class FileLoader(QObject):
 
 
 class _LoadTask(QRunnable):
-    def __init__(self, video_path: Path, svc: VideoService, emitter: FileLoader) -> None:
+    def __init__(
+        self,
+        video_path: Path,
+        svc: VideoService,
+        emitter: FileLoader,
+        subs_dir: Path | None = None,
+    ) -> None:
         super().__init__()
         self._path = video_path
         self._svc = svc
         self._emitter = emitter
+        self._subs_dir = subs_dir
 
     def run(self) -> None:
         try:
@@ -123,7 +137,7 @@ class _LoadTask(QRunnable):
             except VideoServiceError as e:
                 log.warning("fps failed for %s: %s", self._path, e)
 
-            ass_path = FileLoader.find_ass_sidecar(self._path)
+            ass_path = FileLoader.find_ass_sidecar(self._path, subs_dir=self._subs_dir)
             ass: AssFile | None = None
             if ass_path is not None:
                 try:
