@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import glob
 import itertools
 import logging
 import re
@@ -658,6 +657,11 @@ class MainWindow(QMainWindow):
         self._playback_from_group: bool = True
         self._video_path: str | None = None
         self._ass_path: str | None = None
+        # When the user opens a folder whose videos have no local .ass
+        # sidecars, they're prompted to pick a separate subs folder. That
+        # folder is held here for the lifetime of the open folder and reset
+        # every time a new folder is opened. Never persisted.
+        self._subs_dir: Path | None = None
         self._style_clipboard: dict | None = None
         self.__dirty: bool = False
         # Per-label dirty tracker. Accumulates on every labels_mutated;
@@ -1241,7 +1245,7 @@ class MainWindow(QMainWindow):
         _status_msg(self, "Loading...", 0)
 
         # Hand off the metadata probe + sidecar lookup to FileLoader.
-        self._file_loader.load_video(Path(path))
+        self._file_loader.load_video(Path(path), subs_dir=self._subs_dir)
 
     def _on_file_loaded(self, pair: VideoFilePair) -> None:
         """Apply a FileLoader result: metadata to player/timeline, then
@@ -1332,30 +1336,59 @@ class MainWindow(QMainWindow):
 
     def _open_folder_path(self, folder: str) -> None:
         self._cancel_folder_preload()
-        def _has_labels(video: Path) -> bool:
-            exact = video.with_suffix(".ass")
-            if exact.is_file():
-                ass_path = exact
-            else:
-                candidates = sorted(video.parent.glob(f"{glob.escape(video.stem)}.*.ass"))
-                if not candidates:
-                    return False
-                ass_path = candidates[0]
-            try:
-                ass = AssFile(str(ass_path))
-                return bool(ass.labels)
-            except Exception:
-                return False
+        self._subs_dir = None
+        folder_path = Path(folder)
 
-        files = [
-            str(p) for p in Path(folder).iterdir()
-            if p.is_file() and p.suffix.lower() in _VIDEO_EXTS
-            and _has_labels(p)
-        ]
-        files.sort(key=_natural_sort_key)
+        def _scan(subs_dir: Path | None) -> list[str]:
+            def _has_labels(video: Path) -> bool:
+                ass_path = FileLoader.find_ass_sidecar(video, subs_dir=subs_dir)
+                if ass_path is None:
+                    return False
+                try:
+                    ass = AssFile(str(ass_path))
+                    return bool(ass.labels)
+                except Exception:
+                    return False
+
+            files = [
+                str(p) for p in folder_path.iterdir()
+                if p.is_file() and p.suffix.lower() in _VIDEO_EXTS
+                and _has_labels(p)
+            ]
+            files.sort(key=_natural_sort_key)
+            return files
+
+        files = _scan(subs_dir=None)
         if not files:
-            QMessageBox.information(self, "No Videos", "No video files with matching .ass subtitle files containing labels found in the selected folder.")
-            return
+            # No local sidecars — ask the user to point us at a subs folder.
+            reply = QMessageBox.question(
+                self,
+                "No subtitle files found",
+                (
+                    f"No .ass subtitle files were found next to the videos in "
+                    f"{folder_path}.\n\nPick a folder where the subtitle files live?"
+                ),
+                QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Open,
+            )
+            if reply != QMessageBox.StandardButton.Open:
+                return
+            subs_choice = QFileDialog.getExistingDirectory(
+                self, "Select subtitle folder"
+            )
+            if not subs_choice:
+                return
+            self._subs_dir = Path(subs_choice)
+            files = _scan(subs_dir=self._subs_dir)
+            if not files:
+                QMessageBox.information(
+                    self,
+                    "No Videos",
+                    "No video files with matching .ass subtitle files containing labels found in the selected folder.",
+                )
+                self._subs_dir = None
+                return
+
         self._folder_files = files
         # Populate sidebar
         self._folder_path_label.setText(folder)
@@ -1449,6 +1482,7 @@ class MainWindow(QMainWindow):
             workers=self._app_settings.perf.preload_workers,
             ring=self._app_settings.perf.preload_ring,
             generate_thumbnails=self._should_generate_gallery(),
+            subs_dir=self._subs_dir,
         )
         # Centre the ring on the currently-active file in the sidebar so
         # the first file the user opens gets preloaded first, ahead of
