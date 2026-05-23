@@ -20,6 +20,7 @@ SAVE = QKeySequence(QKeySequence.StandardKey.Save)         # Ctrl+S
 
 # Selection / deletion
 DELETE_SELECTED = QKeySequence(Qt.Key.Key_Delete)
+DELETE_SELECTED_ALT = QKeySequence(Qt.Key.Key_Backspace)  # mac "delete" key
 
 # Navigation (keep existing bindings the app already supports)
 NEXT_FRAME = QKeySequence(Qt.Key.Key_Right)

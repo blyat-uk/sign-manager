@@ -1037,6 +1037,7 @@ class MainWindow(QMainWindow):
         QShortcut(shortcuts.PREV_FILE, self, self._prev_file)
         # Delete selected labels
         QShortcut(shortcuts.DELETE_SELECTED, self, self._on_delete)
+        QShortcut(shortcuts.DELETE_SELECTED_ALT, self, self._on_delete)
         # Bold/Italic shortcuts
         self._bold_shortcut = QShortcut(shortcuts.BOLD, self, self._on_bold_shortcut)
         self._italic_shortcut = QShortcut(shortcuts.ITALIC, self, self._on_italic_shortcut)
