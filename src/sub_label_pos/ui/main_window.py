@@ -1222,6 +1222,7 @@ class MainWindow(QMainWindow):
     # ── File loading ──
 
     def _open_video(self) -> None:
+        self._subs_dir = None
         path, _ = QFileDialog.getOpenFileName(
             self, "Open Video", "", "Video Files (*.mkv *.mp4 *.avi *.webm);;All (*)"
         )
@@ -1841,6 +1842,7 @@ class MainWindow(QMainWindow):
         event.ignore()
 
     def dropEvent(self, event: QDropEvent | None) -> None:  # type: ignore[override]
+        self._subs_dir = None
         if not event:
             return
         mime = event.mimeData()
