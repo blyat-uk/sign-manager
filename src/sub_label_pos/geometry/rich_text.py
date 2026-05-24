@@ -132,8 +132,10 @@ def html_to_segments(html: str) -> list[TextSegment]:
                 bold_stack.append(True)
             elif tag in ("i", "em"):
                 italic_stack.append(True)
-            elif tag == "span":
-                # Qt uses inline styles like font-weight:700 and font-style:italic
+            elif tag in ("span", "body"):
+                # Qt uses inline styles like font-weight:700 and font-style:italic.
+                # <body> carries the document-level font (from QTextEdit.setFont),
+                # which is how Qt represents the editor's base bold/italic.
                 is_bold = bold_stack[-1]
                 is_italic = italic_stack[-1]
                 if "font-weight:" in style:
@@ -161,7 +163,7 @@ def html_to_segments(html: str) -> list[TextSegment]:
                 bold_stack.pop()
             elif tag in ("i", "em") and len(italic_stack) > 1:
                 italic_stack.pop()
-            elif tag == "span":
+            elif tag in ("span", "body"):
                 if len(bold_stack) > 1:
                     bold_stack.pop()
                 if len(italic_stack) > 1:

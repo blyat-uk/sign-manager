@@ -91,3 +91,57 @@ def test_from_state_reflects_position_mutation():
     rebuilt2 = AssFile.from_bytes(rebuilt.serialize())
     assert rebuilt2.labels[0].pos_x == 999
     assert rebuilt2.labels[0].pos_y == 42
+
+
+def test_from_state_preserves_non_label_dialogue_lines(tmp_path):
+    """Non-label Dialogue lines (real subtitles, Comment lines) must survive a
+    save round-trip even though they aren't tracked in LabelState.
+
+    Regression: previously _save_ass discarded every Events-section line except
+    labels, silently stripping the subtitle dialogue from the file.
+    """
+    from sub_label_pos.model.label_state import LabelState
+
+    src = (
+        "[Script Info]\n"
+        "PlayResX: 1920\n"
+        "PlayResY: 1080\n"
+        "\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        "Style: Default,Arial,40,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,5,10,10,10,1\n"
+        "Style: Label,Arial,40,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,0,5,10,10,10,1\n"
+        "\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        "Comment: 0,0:00:00.00,0:00:00.10,Default,,0,0,0,,a hand-written comment\n"
+        "Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,subtitle line one\n"
+        "Dialogue: 0,0:00:01.00,0:00:03.00,Label,,0,0,0,,{\\pos(100,200)}Hello\n"
+        "Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,subtitle line two\n"
+        "Dialogue: 0,0:00:05.00,0:00:07.00,Label,,0,0,0,,{\\pos(500,200)}World\n"
+        "Dialogue: 0,0:00:08.00,0:00:09.00,Default,,0,0,0,,trailing subtitle\n"
+    )
+    path = tmp_path / "mixed.ass"
+    path.write_bytes(src.encode("utf-8-sig"))
+
+    a = AssFile.from_path(path)
+    assert len(a.labels) == 2, "fixture should have 2 labels"
+
+    state = LabelState(
+        labels={l.label_id: l for l in a.labels},
+        order=[l.label_id for l in a.labels],
+        styles=a.styles_by_name(),
+    )
+    rebuilt = AssFile.from_state(
+        state,
+        header_lines=a.lines[:a.events_start_index],
+        non_label_event_lines=a.non_label_event_lines,
+    )
+
+    serialized = rebuilt.serialize().decode("utf-8-sig")
+
+    assert "subtitle line one" in serialized, "subtitle dialogue must survive save"
+    assert "subtitle line two" in serialized, "subtitle dialogue must survive save"
+    assert "trailing subtitle" in serialized, "subtitle dialogue must survive save"
+    assert "a hand-written comment" in serialized, "comment line must survive save"
+    assert "Hello" in serialized and "World" in serialized, "labels must still be present"

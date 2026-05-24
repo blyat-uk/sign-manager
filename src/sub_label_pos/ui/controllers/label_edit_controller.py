@@ -14,8 +14,9 @@ from dataclasses import replace
 
 from PyQt6.QtCore import QObject
 
-from sub_label_pos.model.ass_file import LabelDialogue
+from sub_label_pos.model.ass_file import _OVERRIDE_BLOCK_RE, LabelDialogue
 from sub_label_pos.model.label_store import LabelStore
+from sub_label_pos.model.text_transforms import TransformKind, apply as apply_text_transform
 from sub_label_pos.model.mutations import (
     BatchMutation,
     ChangeStyle,
@@ -104,6 +105,27 @@ class LabelEditController(QObject):
         self.submit(EditText(
             label_id=label_id, new_text=new_text, new_rich_text=new_rich_text,
         ))
+
+    def apply_transform(self, label_id: LabelId, kind: TransformKind) -> None:
+        """Apply a text transform to a single label. One undo step."""
+        state = self._store.state
+        label = state.labels.get(label_id)
+        if label is None:
+            return
+        style = state.styles.get(label.style_name)
+        default_bold = label.bold if label.bold is not None else (style.bold if style else False)
+        default_italic = label.italic if label.italic is not None else (style.italic if style else False)
+        source_rich = label.rich_text or label.text
+        new_rich = apply_text_transform(
+            source_rich,
+            kind,
+            default_bold=default_bold,
+            default_italic=default_italic,
+        )
+        if new_rich == source_rich:
+            return
+        new_text = _OVERRIDE_BLOCK_RE.sub("", new_rich).strip()
+        self.edit_text(label_id, new_text, new_rich)
 
     def change_style(self, label_id: LabelId, patch: StylePatch) -> None:
         self.submit(ChangeStyle(label_id=label_id, patch=patch))

@@ -55,6 +55,7 @@ from sub_label_pos.services.frame_request_queue import FrameRequestQueue
 from sub_label_pos.services.mpv_service import MpvPreviewWidget
 from sub_label_pos.services.preload import FilePreloadTask, PreloadResult, PreloadSignals
 from sub_label_pos.services.video_service import CachedVideoService, VideoService
+from sub_label_pos.model.text_transforms import TransformKind
 from sub_label_pos.model.types import StylePatch
 from sub_label_pos import shortcuts
 from sub_label_pos.ui.controllers.file_loader import FileLoader, VideoFilePair
@@ -768,6 +769,7 @@ class MainWindow(QMainWindow):
         self._labels_sidebar.row_jump_requested.connect(self._on_labels_row_jump)
         self._labels_sidebar.row_edit_requested.connect(self._on_edit_requested)
         self._labels_sidebar.row_delete_requested.connect(self._delete_labels)
+        self._labels_sidebar.row_transform_requested.connect(self._apply_text_transform)
 
         # Layout: splitter with video stack + timeline on top, gallery on bottom
         self._mpv_widget = MpvPreviewWidget()
@@ -1393,7 +1395,7 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.StandardButton.Open:
                 return
             subs_choice = QFileDialog.getExistingDirectory(
-                self, "Select subtitle folder"
+                self, "Select subtitle folder", str(folder_path)
             )
             if not subs_choice:
                 return
@@ -1721,6 +1723,7 @@ class MainWindow(QMainWindow):
                 header_lines=header,
                 play_res_x=self._ass.play_res_x,
                 play_res_y=self._ass.play_res_y,
+                non_label_event_lines=self._ass.non_label_event_lines,
             )
             path.write_bytes(rebuilt.serialize())
         except OSError as e:
@@ -1810,6 +1813,7 @@ class MainWindow(QMainWindow):
         index = max(0, min(index, len(self._groups) - 1))
         self._group_index = index
         self._playback_from_group = True
+        self._player.clear_selection()
         group = self._groups[index]
         # If in playback mode, snap back to edit mode (without capturing
         # mpv's current frame — the group's representative time will be
@@ -2451,6 +2455,8 @@ class MainWindow(QMainWindow):
             act = menu.addAction(theme.Icons.edit_text(), "Edit text")
             act.triggered.connect(lambda: self._on_edit_requested(selected[0]))
 
+            self._build_transform_submenu(menu, selected[0].label_id)
+
             act = menu.addAction(theme.Icons.duplicate(), "Duplicate")
             act.setShortcut(shortcuts.DUPLICATE)
             act.triggered.connect(self._on_duplicate)
@@ -2497,6 +2503,32 @@ class MainWindow(QMainWindow):
         act = menu.addAction(theme.Icons.delete(color=theme.Tokens.danger), "Delete")
         act.triggered.connect(lambda: self._delete_group(index))
         menu.exec(QCursor.pos())
+
+    def _build_transform_submenu(self, menu: QMenu, label_id: str) -> None:
+        sub = menu.addMenu("Transform")
+        items: list[tuple[str, TransformKind] | None] = [
+            ("Spaces → line breaks", TransformKind.SPACES_TO_BREAKS),
+            ("Line breaks → spaces", TransformKind.BREAKS_TO_SPACES),
+            ("Balance 2 lines", TransformKind.BALANCE),
+            ("Balance 3 lines", TransformKind.BALANCE_3),
+            None,
+            ("UPPERCASE", TransformKind.UPPERCASE),
+            ("lowercase", TransformKind.LOWERCASE),
+            ("Title Case", TransformKind.TITLE_CASE),
+        ]
+        for entry in items:
+            if entry is None:
+                sub.addSeparator()
+                continue
+            label, kind = entry
+            action = sub.addAction(label)
+            action.triggered.connect(
+                lambda _checked=False, lid=label_id, k=kind: self._apply_text_transform(lid, k)
+            )
+
+    def _apply_text_transform(self, label_id: str, kind: TransformKind) -> None:
+        self._edit.apply_transform(label_id, kind)
+        self._dirty = True
 
     def _build_merge_submenu(self, menu: QMenu, selected: list[LabelDialogue]) -> None:
         merge_menu = menu.addMenu("Merge")

@@ -224,6 +224,12 @@ class AssFile:
         self.play_res_y: int = 1080
         self.styles: dict[str, AssStyle] = {}
         self.labels: list[LabelDialogue] = []
+        # Lines from the original file that live after the [Events] Format
+        # line but did not parse as labels (real subtitle Dialogue lines,
+        # Comment lines, trailing [Fonts]/[Graphics] sections, etc.). The
+        # editor never modifies these; they're carried through saves verbatim
+        # so we don't strip unrelated content from the user's file.
+        self.non_label_event_lines: list[str] = []
         if path is not None:
             self._parse(path)
 
@@ -242,6 +248,7 @@ class AssFile:
         inst.play_res_y = 1080
         inst.styles = {}
         inst.labels = []
+        inst.non_label_event_lines = []
         inst._parse_text(data.decode("utf-8-sig"))
         return inst
 
@@ -252,6 +259,7 @@ class AssFile:
         header_lines: list[str] | None = None,
         play_res_x: int = 1920,
         play_res_y: int = 1080,
+        non_label_event_lines: list[str] | None = None,
     ) -> "AssFile":
         """Build a fresh AssFile from a LabelState snapshot.
 
@@ -263,6 +271,13 @@ class AssFile:
         If ``header_lines`` is None, a minimal default header is generated
         from ``state.styles``.
 
+        ``non_label_event_lines`` (typically passed straight from the source
+        AssFile's attribute of the same name) is written verbatim after the
+        label Dialogue lines so unrelated content in the user's file --
+        actual subtitle lines, Comment lines, trailing [Fonts]/[Graphics]
+        sections -- survives the save round-trip. Without this we'd silently
+        strip every non-label Dialogue from the file.
+
         The styles dict on the resulting AssFile comes from ``state.styles``;
         the label list is rebuilt from each LabelDialogue's preserved
         ``rich_text`` plus a freshly composed leading override block.
@@ -273,6 +288,7 @@ class AssFile:
         inst.play_res_y = play_res_y
         inst.styles = dict(state.styles)
         inst.labels = []
+        inst.non_label_event_lines = list(non_label_event_lines or [])
 
         # 1) Header (everything before [Events]).
         if header_lines is not None:
@@ -326,6 +342,12 @@ class AssFile:
                 label_id=dlg.label_id,
             )
             inst.labels.append(new_dlg)
+
+        # Append preserved non-label event content (subtitles, comments,
+        # trailing sections). Normalize trailing newlines so the joined file
+        # stays well-formed regardless of how the snapshot was sourced.
+        for raw in inst.non_label_event_lines:
+            lines.append(raw if raw.endswith("\n") else raw + "\n")
 
         inst.lines = lines
         return inst
@@ -533,6 +555,30 @@ class AssFile:
                 )
             )
             event_index += 1
+
+        # Capture everything in [Events] after the Format line that didn't
+        # parse as a label, so save() can write it back verbatim. Comment
+        # lines, real subtitle Dialogue lines, and any trailing sections
+        # (e.g. [Fonts], [Graphics]) all live here.
+        self.non_label_event_lines = []
+        label_line_indices = {lbl.line_index for lbl in self.labels}
+        events_idx: int | None = None
+        format_idx: int | None = None
+        for idx, line in enumerate(self.lines):
+            stripped = line.strip().lower()
+            if events_idx is None:
+                if stripped.startswith("[events]"):
+                    events_idx = idx
+                continue
+            if format_idx is None:
+                if stripped.startswith("format:"):
+                    format_idx = idx
+                    break
+        if format_idx is not None:
+            for j in range(format_idx + 1, len(self.lines)):
+                if j in label_line_indices:
+                    continue
+                self.non_label_event_lines.append(self.lines[j])
 
     def set_label_style(self, label: LabelDialogue, style_name: str):
         """Change the style (field 3) in the raw dialogue line.

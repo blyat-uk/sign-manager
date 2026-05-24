@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
 )
 
 from sub_label_pos.model.label_rows import LabelGroupRow, group_labels_by_exact_timing
+from sub_label_pos.model.text_transforms import TransformKind
 from sub_label_pos.ui import theme
 
 if TYPE_CHECKING:
@@ -159,6 +160,7 @@ class LabelsSidebar(QWidget):
     row_edit_requested = pyqtSignal(object)       # LabelDialogue
     row_jump_requested = pyqtSignal(object)       # LabelGroupRow
     row_delete_requested = pyqtSignal(tuple)      # tuple[LabelDialogue, ...]
+    row_transform_requested = pyqtSignal(str, object)  # (label_id, TransformKind)
 
     def __init__(self, store: "LabelStore", parent: QWidget | None = None):
         super().__init__(parent)
@@ -345,6 +347,8 @@ class LabelsSidebar(QWidget):
         act_edit.triggered.connect(
             lambda: self.row_edit_requested.emit(row.labels[0])
         )
+        if len(row.labels) == 1:
+            self._build_transform_submenu(menu, row.labels[0].label_id)
         act_jump = menu.addAction(theme.Icons.time(), "Jump to time")
         act_jump.triggered.connect(lambda: self.row_jump_requested.emit(row))
         menu.addSeparator()
@@ -356,6 +360,28 @@ class LabelsSidebar(QWidget):
             lambda: self.row_delete_requested.emit(row.labels)
         )
         menu.exec(self._list.mapToGlobal(pos))
+
+    def _build_transform_submenu(self, menu, label_id: str) -> None:
+        sub = menu.addMenu("Transform")
+        items: list[tuple[str, TransformKind] | None] = [
+            ("Spaces → line breaks", TransformKind.SPACES_TO_BREAKS),
+            ("Line breaks → spaces", TransformKind.BREAKS_TO_SPACES),
+            ("Balance 2 lines", TransformKind.BALANCE),
+            ("Balance 3 lines", TransformKind.BALANCE_3),
+            None,
+            ("UPPERCASE", TransformKind.UPPERCASE),
+            ("lowercase", TransformKind.LOWERCASE),
+            ("Title Case", TransformKind.TITLE_CASE),
+        ]
+        for entry in items:
+            if entry is None:
+                sub.addSeparator()
+                continue
+            label, kind = entry
+            action = sub.addAction(label)
+            action.triggered.connect(
+                lambda _checked=False, lid=label_id, k=kind: self.row_transform_requested.emit(lid, k)
+            )
 
     def showEvent(self, event):
         super().showEvent(event)

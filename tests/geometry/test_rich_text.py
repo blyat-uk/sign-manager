@@ -86,6 +86,62 @@ def test_segments_to_html_converts_newline_to_br():
     assert segments_to_html(segs) == "a<br>b"
 
 
+def test_html_to_segments_inherits_body_bold():
+    """Qt's toHtml puts document-level bold on <body style="font-weight:700">.
+    Text inside must be parsed as bold (else round-trip injects spurious {\\b0})."""
+    qt_html = (
+        '<html><head></head>'
+        '<body style=" font-family:\'Arial\'; font-size:16pt; '
+        'font-weight:700; font-style:normal;">'
+        '<p>hello</p></body></html>'
+    )
+    segs = html_to_segments(qt_html)
+    assert segs
+    assert all(s.bold for s in segs if s.text)
+
+
+def test_html_to_segments_inherits_body_italic():
+    qt_html = (
+        '<html><head></head>'
+        '<body style=" font-family:\'Arial\'; font-size:16pt; '
+        'font-weight:400; font-style:italic;">'
+        '<p>hi</p></body></html>'
+    )
+    segs = html_to_segments(qt_html)
+    assert segs
+    assert all(s.italic for s in segs if s.text)
+
+
+def test_qt_roundtrip_with_bold_style_emits_no_b0():
+    """Reproduces the reported bug: editing a label whose effective style is
+    bold (and clicking outside without changes) must not inject {\\b0}."""
+    qt_html = (
+        '<html><head></head>'
+        '<body style=" font-family:\'Arial\'; font-size:16pt; '
+        'font-weight:700; font-style:normal;">'
+        '<p>hello world</p></body></html>'
+    )
+    segs = html_to_segments(qt_html)
+    out = segments_to_ass(segs, default_bold=True, default_italic=False)
+    assert "\\b" not in out
+    assert "hello world" in out
+
+
+def test_partial_unbold_inside_bold_body():
+    """User unbolds the first word in an editor whose body font is bold."""
+    qt_html = (
+        '<html><head></head>'
+        '<body style=" font-family:\'Arial\'; font-size:16pt; '
+        'font-weight:700; font-style:normal;">'
+        '<p><span style=" font-weight:400;">hello</span> world</p></body></html>'
+    )
+    segs = html_to_segments(qt_html)
+    bold_text = "".join(s.text for s in segs if s.bold)
+    unbold_text = "".join(s.text for s in segs if not s.bold)
+    assert unbold_text == "hello"
+    assert bold_text == " world"
+
+
 def test_html_to_segments_handles_br():
     """<br> in HTML maps back to a \\N segment."""
     segs = html_to_segments("<p>a<br>b</p>")
