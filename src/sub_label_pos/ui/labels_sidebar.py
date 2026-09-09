@@ -251,14 +251,14 @@ class LabelsSidebar(QWidget):
         # Subscribe to store signals.
         self._store.file_loaded.connect(self._on_file_loaded)
         self._store.labels_mutated.connect(self._on_labels_mutated)
+        self._store.labels_added.connect(self._on_labels_structure_changed)
+        self._store.labels_removed.connect(self._on_labels_structure_changed)
         self._store.selection_changed.connect(self._on_selection_changed)
 
     def set_dirty_ids(self, ids: set["LabelId"]) -> None:
         """Caller informs us which labels are unsaved. Triggers row repaint."""
         self._dirty_ids = set(ids)
-        # Row widgets re-read dirty state on the next rebuild; for now just
-        # mark pending. (Task 7 wires the per-row repaint.)
-        self._rebuild_pending = True
+        self._refresh_dirty_state()
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -283,6 +283,14 @@ class LabelsSidebar(QWidget):
         # Accumulate dirty ids and schedule a rebuild (grouping may have
         # changed if timing was edited).
         self._dirty_ids |= set(ids)
+        self._rebuild_pending = True
+        if self.isVisible():
+            self._rebuild()
+
+    def _on_labels_structure_changed(self, _ids: set) -> None:
+        # Labels appeared or disappeared. Structural mutations emit
+        # labels_added / labels_removed and never labels_mutated, so this is
+        # the only signal telling us a deleted label must leave the list.
         self._rebuild_pending = True
         if self.isVisible():
             self._rebuild()
