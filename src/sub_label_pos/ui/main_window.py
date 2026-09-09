@@ -1936,7 +1936,7 @@ class MainWindow(QMainWindow):
         if not selected:
             return
         label = selected[0]
-        rect = self._player._label_rects.get(label.line_index)
+        rect = self._player._label_rects.get(label.label_id)
         if rect:
             self._toolbar.position_above(rect.center().x(), rect.top())
 

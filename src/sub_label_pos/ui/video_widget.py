@@ -249,10 +249,13 @@ class VideoFrameWidget(QWidget):
         # canvas_resized AFTER refreshing _label_rects, so listeners that
         # reposition against rects see fresh coordinates.
         self._pending_resize_emit: bool = False
-        # Per-paint scratch dict keyed by line_index, used for hit-testing
-        # and handle/edit positioning between paints. Cleared and repopulated
-        # each paintEvent.
-        self._label_rects: dict[int, QRectF] = {}
+        # Per-paint scratch dict keyed by LabelId, used for hit-testing and
+        # handle/edit positioning between paints. Cleared and repopulated
+        # each paintEvent. Keyed by id -- NOT by line_index, which records a
+        # label's position in the parsed file and is not kept unique across
+        # structural mutations (DuplicateLabel copies it from the source),
+        # so using it here made one label of a colliding pair unhittable.
+        self._label_rects: dict[LabelId, QRectF] = {}
         # Persistent cache of computed label rects keyed by LabelId. Avoids
         # re-running compute_label_rect (which rebuilds QFont per segment and
         # measures via QFontMetricsF) on every paint. Invalidated on store
@@ -304,7 +307,7 @@ class VideoFrameWidget(QWidget):
         self._drag_mode: _DragMode = _DragMode.NONE
         self._dragging: LabelDialogue | None = None
         self._drag_offset = QPointF()
-        self._multi_drag_initial: dict[int, tuple[int, int]] = {}  # line_index -> (pos_x, pos_y)
+        self._multi_drag_initial: dict[LabelId, tuple[int, int]] = {}  # label_id -> (pos_x, pos_y)
 
         # Resize/rotate handle state
         self._resize_corner: int = -1       # 0=TL, 1=TR, 2=BR, 3=BL
@@ -418,8 +421,8 @@ class VideoFrameWidget(QWidget):
 
     def _on_store_labels_structure_changed(self, _ids: set) -> None:
         """Store reported labels added or removed -- flush the rect + render
-        caches to be safe (renumbering/reordering can confuse line_index-
-        indexed paint scratch dict), refresh visible list, and repaint."""
+        caches to be safe (a reused LabelId would otherwise resolve to the
+        previous label's geometry), refresh visible list, and repaint."""
         self._rect_cache.clear()
         self._render_cache.clear()
         # Drag layer encodes the previous set of visible labels; structural
@@ -894,7 +897,7 @@ class VideoFrameWidget(QWidget):
         if label is None:
             return None
 
-        rect = self._label_rects.get(label.line_index)
+        rect = self._label_rects.get(label.label_id)
         if rect is None:
             return None
 
@@ -1062,13 +1065,13 @@ class VideoFrameWidget(QWidget):
                 painter.save()
                 painter.setOpacity(0.4)
             # Skip the label being edited inline
-            if self._editing_label and label.line_index == self._editing_label.line_index:
+            if self._editing_label and label.label_id == self._editing_label.label_id:
                 continue
 
             font = self._font_for_label(label)
             painter.setFont(font)
             rect = self._compute_rect(label, font)
-            self._label_rects[label.line_index] = rect
+            self._label_rects[label.label_id] = rect
 
             # Filter: skip actual drawing for labels outside include_only or
             # inside exclude_ids. The rect was still recorded above so hit-
@@ -1257,7 +1260,7 @@ class VideoFrameWidget(QWidget):
         # Draw hovered label timestamp (overlays both modes; needs
         # _label_rects which _paint_labels populated above).
         if self._hovered_label is not None:
-            hr = self._label_rects.get(self._hovered_label.line_index)
+            hr = self._label_rects.get(self._hovered_label.label_id)
             if hr is not None:
                 ts = (f"{_seconds_to_time(self._hovered_label.start_time)}"
                       f" \u2192 {_seconds_to_time(self._hovered_label.end_time)}")
@@ -1289,10 +1292,7 @@ class VideoFrameWidget(QWidget):
         if len(selected_ids) > 1:
             rects: list[QRectF] = []
             for lid in selected_ids:
-                lb = self._store.state.labels.get(lid)
-                if lb is None:
-                    continue
-                r = self._label_rects.get(lb.line_index)
+                r = self._label_rects.get(lid)
                 if r is not None:
                     rects.append(r)
             if rects:
@@ -1320,13 +1320,8 @@ class VideoFrameWidget(QWidget):
         # Hidden when the hovered label is part of the active selection (the
         # selection draw already provides a stronger blue outline).
         if self._hovered_label is not None:
-            hovered_id = getattr(self._hovered_label, "line_index", None)
-            selected_ids = {
-                self._store.state.labels[lid].line_index
-                for lid in self._store.selected
-                if lid in self._store.state.labels
-            }
-            if hovered_id is not None and hovered_id not in selected_ids:
+            hovered_id = self._hovered_label.label_id
+            if hovered_id and hovered_id not in self._store.selected:
                 rect = self._label_rects.get(hovered_id)
                 if rect is not None:
                     painter.setPen(QPen(QColor(255, 255, 255, 217), 1.5))
@@ -1399,7 +1394,7 @@ class VideoFrameWidget(QWidget):
         # ghosts second so clicking a dimmed selected-but-out-of-window label
         # still hits it.
         for label in (*reversed(self._visible_labels), *reversed(self._ghost_labels)):
-            rect = self._label_rects.get(label.line_index)
+            rect = self._label_rects.get(label.label_id)
             if not rect:
                 continue
             rotation = label.rotation if label.rotation is not None else 0.0
@@ -1428,7 +1423,7 @@ class VideoFrameWidget(QWidget):
                 self._drag_started = True
                 self._press_pos = pos
 
-                rect = self._label_rects.get(label.line_index)
+                rect = self._label_rects.get(label.label_id)
                 if rect:
                     anchor = self._anchor_from_rect(rect, label)
                     if mode == _DragMode.RESIZE:
@@ -1612,7 +1607,7 @@ class VideoFrameWidget(QWidget):
 
         # Record initial positions for all selected labels
         self._multi_drag_initial = {
-            lb.line_index: (lb.pos_x, lb.pos_y) for lb in self.selected_labels()
+            lb.label_id: (lb.pos_x, lb.pos_y) for lb in self.selected_labels()
         }
 
         # Compute drag offset from the primary label's anchor
@@ -1738,7 +1733,7 @@ class VideoFrameWidget(QWidget):
 
         # Compute delta from primary label's initial position
         init_x, init_y = self._multi_drag_initial.get(
-            primary.line_index, (primary.pos_x, primary.pos_y)
+            primary.label_id, (primary.pos_x, primary.pos_y)
         )
         delta_x = final_x - init_x
         delta_y = final_y - init_y
@@ -1749,7 +1744,7 @@ class VideoFrameWidget(QWidget):
         # Render cache is kept: position changes don't affect text layout.
         for lb in self.selected_labels():
             lb_init_x, lb_init_y = self._multi_drag_initial.get(
-                lb.line_index, (lb.pos_x, lb.pos_y)
+                lb.label_id, (lb.pos_x, lb.pos_y)
             )
             lb.pos_x = lb_init_x + delta_x
             lb.pos_y = lb_init_y + delta_y
@@ -1778,7 +1773,7 @@ class VideoFrameWidget(QWidget):
         label = self._handle_label
         if not label:
             return
-        rect = self._label_rects.get(label.line_index)
+        rect = self._label_rects.get(label.label_id)
         if not rect:
             return
         anchor = self._anchor_from_rect(rect, label)
@@ -1821,7 +1816,7 @@ class VideoFrameWidget(QWidget):
         label = self._handle_label
         if not label:
             return
-        rect = self._label_rects.get(label.line_index)
+        rect = self._label_rects.get(label.label_id)
         if not rect:
             return
         anchor = self._anchor_from_rect(rect, label)
@@ -1860,7 +1855,7 @@ class VideoFrameWidget(QWidget):
         self._editing_label = label
 
         font = self._font_for_label(label)
-        rect = self._label_rects.get(label.line_index)
+        rect = self._label_rects.get(label.label_id)
         if not rect:
             rect = self._compute_rect(label, font)
 
