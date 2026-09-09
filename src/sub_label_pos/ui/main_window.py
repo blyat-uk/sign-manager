@@ -2088,7 +2088,7 @@ class MainWindow(QMainWindow):
         selected = self._player.selected_labels()
         if not selected:
             return
-        if selected_attrs is None:
+        if not isinstance(selected_attrs, (set, frozenset)):
             selected_attrs = {"font_size", "alignment", "bold", "italic", "style",
                               "primary_colour", "outline_colour", "outline_width", "rotation",
                               "position"}
@@ -2464,7 +2464,9 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
 
             act = menu.addAction(theme.Icons.copy_style(), "Copy style…")
-            act.triggered.connect(self._on_copy_style)
+            # Wrapped: QAction.triggered carries a `checked` bool that would
+            # otherwise land in the slot's `selected_attrs` parameter.
+            act.triggered.connect(lambda: self._on_copy_style())
 
         if self._style_clipboard is not None:
             act = menu.addAction(theme.Icons.paste_style(), "Paste style")
