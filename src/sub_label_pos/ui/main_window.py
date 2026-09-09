@@ -916,13 +916,9 @@ class MainWindow(QMainWindow):
         self._redo_btn.setEnabled(False)
         self._store.undo_stack.can_undo_changed.connect(self._undo_btn.setEnabled)
         self._store.undo_stack.can_redo_changed.connect(self._redo_btn.setEnabled)
-        # Unsaved-dot wiring — UndoStack has no dirty_changed signal, so mark
-        # dirty on every label mutation and clear it explicitly in _save_ass.
-        self._store.labels_mutated.connect(
-            lambda _ids: self._save_btn.set_unsaved(True)
-        )
-        self._store.labels_mutated.connect(self._on_labels_mutated_dirty)
-        self._store.file_loaded.connect(self._on_file_loaded_dirty)
+        # Unsaved-indicator wiring — UndoStack has no dirty_changed signal, so
+        # mark dirty on every label change and clear it explicitly in _save_ass.
+        self._wire_label_change_signals()
         self._main_tb.addWidget(self._undo_btn)
         self._main_tb.addWidget(self._redo_btn)
 
@@ -1023,8 +1019,7 @@ class MainWindow(QMainWindow):
         self._sb_file_index.hide()
         self._sb_modified.hide()
 
-        # Wire signals
-        self._store.labels_mutated.connect(self._on_labels_mutated_for_status)
+        # Wire signals (label changes are handled by _wire_label_change_signals)
         self._playback.time_changed.connect(self._on_time_changed_for_status)
 
         # Shortcuts — frame stepping (arrow keys)
@@ -1609,10 +1604,6 @@ class MainWindow(QMainWindow):
             self._apply_loaded_ass(AssFile(path), path)
 
     # ── Status bar helpers (Task 13) ──
-
-    def _on_labels_mutated_for_status(self, _ids) -> None:
-        self._sb_modified.show()
-        self._update_status_counts()
 
     def _on_time_changed_for_status(self, current_s: float) -> None:
         self._sb_time.set_text(_format_hms(current_s))
@@ -2812,8 +2803,39 @@ class MainWindow(QMainWindow):
             self._labels_sidebar_btn.setChecked(visible)
             self._labels_sidebar_btn.blockSignals(False)
 
-    def _on_labels_mutated_dirty(self, ids: set) -> None:
-        self._dirty_label_ids |= set(ids)
+    def _wire_label_change_signals(self) -> None:
+        """Route every label-change signal at the unsaved indicators.
+
+        Property edits emit ``labels_mutated``, but structural ones (delete,
+        duplicate, merge, split) emit ``labels_added`` / ``labels_removed``
+        and never ``labels_mutated`` — wiring only the first left the Save dot
+        dark and the status chip hidden after a delete.
+        """
+        self._store.labels_mutated.connect(self._on_labels_changed)
+        self._store.labels_added.connect(self._on_labels_changed)
+        self._store.labels_removed.connect(self._on_labels_removed)
+        self._store.file_loaded.connect(self._on_file_loaded_dirty)
+
+    def _on_labels_removed(self, ids: set) -> None:
+        """Labels were deleted — same unsaved indicators, but their ids leave
+        the dirty set rather than joining it."""
+        self._on_labels_changed(ids, removed=True)
+
+    def _on_labels_changed(self, ids: set, removed: bool = False) -> None:
+        """A label changed: flag the file unsaved and track the dirty ids.
+
+        ``removed`` labels have no row left to carry a dirty dot, so their ids
+        leave the dirty set instead of joining it.
+        """
+        self._save_btn.set_unsaved(True)
+        # Wiring happens before the status bar is built, so guard its widgets.
+        if hasattr(self, "_sb_modified"):
+            self._sb_modified.show()
+            self._update_status_counts()
+        if removed:
+            self._dirty_label_ids -= set(ids)
+        else:
+            self._dirty_label_ids |= set(ids)
         if hasattr(self, "_labels_sidebar"):
             self._labels_sidebar.set_dirty_ids(self._dirty_label_ids)
 
