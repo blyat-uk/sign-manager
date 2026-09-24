@@ -58,7 +58,7 @@ ENV/
 .coverage
 htmlcov/
 
-# PyInstaller
+# Packaging leftovers
 *.manifest
 *.spec
 # Installer logs
@@ -159,3 +159,7 @@ site/
 
 .claude/
 docs/
+
+# Briefcase
+.briefcase/
+logs/

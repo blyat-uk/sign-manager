@@ -1,0 +1,13 @@
+# Changelog
+
+## 1.0.0 (2026-09-25)
+
+First public release, under the new name **Sign Manager** (formerly sub-label-pos).
+
+- Native installers built with Briefcase: Windows .msi/.zip, macOS .dmg (Apple Silicon),
+  and Ubuntu .deb, Fedora .rpm and Arch .pkg.tar.zst packages that pull in mpv and ffmpeg.
+- On Windows x64 and macOS arm64, mpv and ffmpeg are downloaded once on first run
+  (checked against pinned SHA-256s) into the per-user data folder.
+- No console windows flash on Windows while frames are extracted.
+- Settings carry over from sub-label-pos.
+- `--version`, `--self-test [--report FILE]`, `--install-runtime-deps` and `--quit-after SECONDS`.

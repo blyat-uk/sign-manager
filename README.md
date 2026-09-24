@@ -1,6 +1,8 @@
-# Sub Label Pos
+<p align="center"><img src="src/sign_manager/resources/icons/sign-manager-128.png" width="96" alt=""></p>
 
-A desktop application for visually editing label positions in ASS subtitle files. Load a video alongside its `.ass` file, then drag labels directly on the video frame to reposition them.
+# Sign Manager
+
+A desktop application for visually editing sign/label positions in ASS subtitle files. Load a video alongside its `.ass` file, then drag labels directly on the video frame to reposition them.
 
 <p align="center">
   <img src="assets/screenshots/01-editor.png" alt="Editor with a video loaded, labels list on the right, gallery at the bottom, and a label selected on the canvas">
@@ -22,70 +24,62 @@ A desktop application for visually editing label positions in ASS subtitle files
 - Persistent **status bar** with file index, frame timecode, label/group counts, resolution, and current HW-decode mode
 - Settings dialog with three performance profiles (**Performance / Balanced / Quality**) that auto-detect on first launch and can be overridden at any time
 
-## Requirements
+## Download
 
-- Python 3.10 or later
-- FFmpeg and FFprobe (must be available on your system PATH)
-- PyQt6 and qtawesome (installed automatically as Python dependencies)
+Get the latest build from the [Releases page](https://github.com/blyat-uk/sign-manager/releases/latest):
 
-## Installation
+| OS | File |
+|---|---|
+| Windows 10/11 (x64) | `sign-manager-vX.Y.Z-win.msi` (installer) or `-win.zip` (portable) |
+| macOS 14+ (Apple Silicon) | `sign-manager-vX.Y.Z-mac.dmg` |
+| Ubuntu 24.04+ / Debian 13 | `sign-manager-vX.Y.Z-linux-ubuntu.deb` — `sudo apt install ./sign-manager-*.deb` |
+| Fedora | `sign-manager-vX.Y.Z-linux-fedora.rpm` — `sudo dnf install ./sign-manager-*.rpm` |
+| Arch Linux | `sign-manager-vX.Y.Z-linux-arch.pkg.tar.zst` — `sudo pacman -U ./sign-manager-*.pkg.tar.zst` |
 
-### 1. Install FFmpeg
+Verify downloads against `SHA256SUMS.txt` in the release.
 
-**Linux (Debian/Ubuntu):**
+- **Windows:** the installer is not code-signed; SmartScreen may ask you to confirm (More info → Run anyway).
+- **macOS:** the app is not notarized. Open it once with right-click → Open, or run
+  `xattr -dr com.apple.quarantine "/Applications/Sign Manager.app"`.
+- **Fedora:** the stock `ffmpeg-free` cannot decode HEVC; install `ffmpeg` from [RPM Fusion](https://rpmfusion.org/) for H.265 video.
 
-```
-sudo apt install ffmpeg
-```
+## First run
 
-**Linux (Fedora):**
+Sign Manager plays video with [mpv](https://mpv.io/) (libmpv) and reads frames with [FFmpeg](https://ffmpeg.org/). Neither is inside the download:
 
-```
-sudo dnf install ffmpeg
-```
+- **Windows and macOS:** on first start the app offers to download them once (about 130 MB on Windows, 30 MB on macOS) from this repository's [`runtime-deps-1`](https://github.com/blyat-uk/sign-manager/releases/tag/runtime-deps-1) release, checked against a pinned SHA-256. They are stored in your user data folder — `%LOCALAPPDATA%\sign-manager\runtime` on Windows, `~/Library/Application Support/sign-manager/runtime` on macOS — so app updates don't download them again. `sign-manager --install-runtime-deps` does the same from a terminal. If you'd rather install them yourself, choose **Manual instructions**; Homebrew's `brew install mpv ffmpeg` is picked up automatically on macOS.
+- **Linux:** the packages depend on mpv and ffmpeg, so your package manager installs them.
 
-**Linux (Arch):**
+Sign Manager was previously called **sub-label-pos**; your settings carry over automatically on first start.
 
-```
-sudo pacman -S ffmpeg
-```
+Logs are written to `logs/sign-manager.log` in the same data folder (`~/.local/share/sign-manager` on Linux) when the app has no console. Set `SIGN_MANAGER_DATA_DIR` to use a different folder.
 
-**Windows:**
+## Running from source
 
-Download from https://ffmpeg.org/download.html and add the `bin` folder to your system PATH.
-
-**macOS:**
-
-```
-brew install ffmpeg
-```
-
-### 2. Clone the repository
+Requires Python 3.12+, plus libmpv and ffmpeg/ffprobe from your package manager (`sudo apt install libmpv2 ffmpeg`, `sudo dnf install mpv-libs ffmpeg`, `sudo pacman -S mpv ffmpeg`, `brew install mpv ffmpeg`; on Windows run `python -m sign_manager --install-runtime-deps` after installing).
 
 ```
-git clone https://codeberg.org/BuGiPoP/sub-label-pos.git
-cd sub-label-pos
+git clone https://github.com/blyat-uk/sign-manager.git
+cd sign-manager
+uv sync --extra dev        # or: python -m venv .venv && pip install -e .[dev]
+uv run sign-manager        # or: python -m sign_manager
+uv run pytest
 ```
 
-### 3. Set up a virtual environment and install the package
+Command-line options: `--version`, `--self-test [--report FILE]` (checks every module and the external tools, exits 0/1), `--install-runtime-deps`, `--quit-after SECONDS`.
+
+### Building the installers
+
+Packages are built with [Briefcase](https://briefcase.readthedocs.io/) by `.github/workflows/release.yml` on every `v*` tag. Locally:
 
 ```
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .[dev]
+uv pip install briefcase
+briefcase package macOS app -p dmg --adhoc-sign                         # on macOS
+briefcase package windows app --adhoc-sign                              # on Windows
+briefcase package linux system --target ubuntu:24.04 --adhoc-sign       # needs Docker; also fedora:44, archlinux:latest
 ```
 
-On Windows, replace the activate line with:
-
-```
-.venv\Scripts\activate
-```
-
-### 4. Run the application
-
-```
-sub-label-pos
-```
+The runtime-dependency zips are built by `.github/workflows/runtime-deps.yml` (scripts in `packaging/runtime_deps/`); the icon by `uv run --with pillow python packaging/make_icon.py`.
 
 ## Usage
 
@@ -179,24 +173,4 @@ The first time you launch the app it detects your machine's RAM and CPU and pick
 
 ## License
 
-MIT License
-
-Copyright (c) 2026
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+[MIT](LICENSE) © 2026 blyat-uk. The runtime-dependency downloads contain mpv and FFmpeg, which are GPL-licensed; see the `runtime-deps-1` release notes.
