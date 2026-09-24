@@ -1,99 +1,292 @@
 name: Release
 
+# A v* tag runs the tests, builds the Briefcase packages, smoke-tests each one
+# on its own OS (Linux packages are installed into clean distro containers, so
+# the declared dependencies are proven) and publishes a GitHub Release. A
+# manual run builds and tests without releasing.
+
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Release tag (e.g. v1.2.0)"
-        required: true
-        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build ${{ matrix.os }}
-    runs-on: ${{ matrix.runner }}
+  version:
+    name: Check version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: Tag matches src/sign_manager/version.py
+        shell: bash
+        run: |
+          version=$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/sign_manager/version.py)
+          echo "src/sign_manager/version.py: $version"
+          if [[ -z "$version" ]]; then
+            echo "::error::could not read __version__"
+            exit 1
+          fi
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match src/sign_manager/version.py ($version)"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Tests
+    uses: ./.github/workflows/ci.yml
+
+  build-desktop:
+    name: Build (${{ matrix.os_name }})
+    needs: [version, test]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: linux
-            runner: ubuntu-latest
-            artifact_name: sub-label-pos-linux
-          - os: windows
-            runner: windows-latest
-            artifact_name: sub-label-pos-windows.exe
-          - os: macos
-            runner: macos-latest
-            artifact_name: sub-label-pos-macos
-
+          - runner: windows-latest
+            os_name: win
+          - runner: macos-latest      # Apple Silicon
+            os_name: mac
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: "1"
+      VERSION: ${{ needs.version.outputs.version }}
+      SIGN_MANAGER_DATA_DIR: ${{ github.workspace }}/.smoke-data
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      # Linux build: libmpv must be present at PyInstaller bundle time, even
-      # though end users will still need their own libmpv installed.
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
+      - name: Briefcase
+        run: python -m pip install --upgrade pip briefcase
+
+      - name: Package (Windows .msi + .zip)
+        if: matrix.os_name == 'win'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libmpv2 ffmpeg
+          briefcase package windows app -p msi --adhoc-sign --no-input
+          briefcase package windows app -p zip --adhoc-sign --no-input
 
-      # macOS build: brew installs the mpv binary + libmpv. ffmpeg is a
-      # runtime requirement for the editor frame extractor.
-      - name: Install system dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: brew install mpv ffmpeg
+      - name: Package (macOS .dmg)
+        if: matrix.os_name == 'mac'
+        run: briefcase package macOS app -p dmg --adhoc-sign --no-input
 
-      # Windows: python-mpv looks for mpv-2.dll on PATH at import time.
-      # GitHub's windows-latest runner has no libmpv preinstalled. The
-      # binary built below will NOT work for end users unless mpv-2.dll
-      # is shipped alongside it (PyInstaller --add-binary) or end users
-      # install mpv themselves. Distribution is intentionally out of scope
-      # for this workflow — Windows users currently need mpv on PATH.
-
-      - name: Install build dependencies
-        run: python -m pip install ".[build]"
-
-      - name: Build with PyInstaller
-        run: pyinstaller --onefile --windowed --name sub-label-pos main.py
-
-      - name: Stage artifact
+      - name: Rename
         shell: bash
         run: |
           mkdir -p out
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            mv dist/sub-label-pos.exe "out/${{ matrix.artifact_name }}"
+          shopt -s nullglob
+          if [[ "${{ matrix.os_name }}" == win ]]; then
+            msi=(dist/*.msi); zip=(dist/*.zip)
+            [[ ${#msi[@]} -eq 1 && ${#zip[@]} -eq 1 ]] || { ls -la dist; exit 1; }
+            cp "${msi[0]}" "out/sign-manager-v$VERSION-win.msi"
+            cp "${zip[0]}" "out/sign-manager-v$VERSION-win.zip"
           else
-            mv dist/sub-label-pos "out/${{ matrix.artifact_name }}"
-            chmod +x "out/${{ matrix.artifact_name }}"
+            dmg=(dist/*.dmg)
+            [[ ${#dmg[@]} -eq 1 ]] || { ls -la dist; exit 1; }
+            cp "${dmg[0]}" "out/sign-manager-v$VERSION-mac.dmg"
           fi
+          ls -la out
 
-      - name: Set up rclone
-        uses: AnimMouse/setup-rclone@v1
-        with:
-          rclone_config: ${{ secrets.RCLONE_CONFIG_MEGA }}
-
-      - name: Upload to MEGA
-        shell: bash
-        env:
-          MEGA_UPLOAD_PATH: ${{ vars.MEGA_UPLOAD_PATH }}
-          RELEASE_TAG: ${{ inputs.tag }}
-          ARTIFACT_NAME: ${{ matrix.artifact_name }}
+      - name: Smoke test (macOS .app)
+        if: matrix.os_name == 'mac'
+        timeout-minutes: 15
         run: |
-          DEST="mega:${MEGA_UPLOAD_PATH}${RELEASE_TAG}/"
-          # On macOS, --windowed --onefile produces both ./out/<name> (single
-          # binary, after staging) and dist/sub-label-pos.app/. We only ship
-          # the staged single file from out/ — keep this rclone invocation
-          # file-targeted, not dir.
-          rclone copy "./out/${ARTIFACT_NAME}" "$DEST" \
-            --retries 5 --low-level-retries 20 --transfers 1
-          # Verify the upload actually landed; rclone copy can report success
-          # without the file appearing remotely under flaky MEGA conditions.
-          if ! rclone lsf "$DEST" | grep -qFx "${ARTIFACT_NAME}"; then
-            echo "ERROR: ${ARTIFACT_NAME} not found in ${DEST} after upload" >&2
-            exit 1
-          fi
-          echo "Uploaded and verified ${DEST}${ARTIFACT_NAME}" >> "$GITHUB_STEP_SUMMARY"
+          app=$(find build -name "Sign Manager.app" -type d -prune | head -1)
+          echo "app: $app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          exe="$app/Contents/MacOS/Sign Manager"
+          "$exe" --version
+          "$exe" --install-runtime-deps
+          set +e
+          "$exe" --self-test --report "$RUNNER_TEMP/self-test.json"
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/self-test.json"
+          [[ $code -eq 0 ]] || { echo "::error::self-test exited $code"; exit 1; }
+          python -c "import json,sys; sys.exit(0 if json.load(open('$RUNNER_TEMP/self-test.json'))['ok'] else 1)"
+
+      - name: Smoke test (Windows exe)
+        if: matrix.os_name == 'win'
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse -Path build -Filter "Sign Manager.exe" | Select-Object -First 1
+          if (-not $exe) { throw "built exe not found" }
+          Write-Host "exe: $($exe.FullName)"
+          $p = Start-Process -Wait -PassThru -NoNewWindow -FilePath $exe.FullName -ArgumentList '--install-runtime-deps'
+          if ($p.ExitCode -ne 0) { throw "--install-runtime-deps exited with $($p.ExitCode)" }
+          $report = Join-Path $env:RUNNER_TEMP 'self-test.json'
+          $p = Start-Process -Wait -PassThru -NoNewWindow -FilePath $exe.FullName -ArgumentList '--self-test','--report',"`"$report`""
+          if (-not (Test-Path $report)) { throw "self-test wrote no report" }
+          Get-Content $report
+          if ($p.ExitCode -ne 0) { throw "self-test exited with $($p.ExitCode)" }
+          $json = Get-Content $report -Raw | ConvertFrom-Json
+          if (-not $json.ok) { throw "self-test report says not ok" }
+
+      - name: App log (on failure)
+        if: failure()
+        shell: bash
+        run: |
+          for f in "$SIGN_MANAGER_DATA_DIR"/logs/*.log*; do
+            [[ -f "$f" ]] && { echo "== $f"; tail -c 6000 "$f"; }
+          done
+          true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sign-manager-${{ matrix.os_name }}
+          path: out/sign-manager-v*
+          if-no-files-found: error
+          compression-level: 0
+
+  build-linux:
+    name: Build (linux ${{ matrix.distro }})
+    needs: [version, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: ubuntu
+            image: ubuntu:24.04
+            ext: deb
+            install: export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y /dist/pkg.deb
+          - distro: fedora
+            image: fedora:44
+            ext: rpm
+            install: dnf install -y /dist/pkg.rpm
+          - distro: arch
+            image: archlinux:latest
+            ext: pkg.tar.zst
+            install: pacman -Syu --noconfirm && pacman -U --noconfirm /dist/pkg.pkg.tar.zst
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Briefcase
+        run: python -m pip install --upgrade pip briefcase
+
+      - name: Package (${{ matrix.image }})
+        run: briefcase package linux system --target ${{ matrix.image }} --adhoc-sign --no-input
+
+      - name: Rename
+        shell: bash
+        run: |
+          shopt -s nullglob
+          pkgs=(dist/*.${{ matrix.ext }})
+          [[ ${#pkgs[@]} -eq 1 ]] || { ls -la dist; exit 1; }
+          mkdir -p out
+          cp "${pkgs[0]}" "out/sign-manager-v$VERSION-linux-${{ matrix.distro }}.${{ matrix.ext }}"
+          ls -la out
+
+      - name: Smoke test (install into a clean ${{ matrix.image }})
+        timeout-minutes: 20
+        run: |
+          mkdir -p smoke
+          cp out/sign-manager-v*.${{ matrix.ext }} "smoke/pkg.${{ matrix.ext }}"
+          docker run --rm -v "$PWD/smoke:/dist" ${{ matrix.image }} bash -euo pipefail -c '
+            ${{ matrix.install }}
+            sign-manager --version
+            sign-manager --self-test --report /dist/self-test.json
+          '
+          cat smoke/self-test.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sign-manager-linux-${{ matrix.distro }}
+          path: out/sign-manager-v*
+          if-no-files-found: error
+          compression-level: 0
+
+  release:
+    name: Publish release
+    needs: [version, build-desktop, build-linux]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum sign-manager-v* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Release notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          read -r WIN_MB MAC_MB < <(PYTHONPATH=src python3 -c '
+          import ast, pathlib, re
+          src = pathlib.Path("src/sign_manager/services/runtime_download.py").read_text()
+          sizes = dict(re.findall(r"\(\"(win|mac)\", \"\w+\"\): Artifact\(.*?size=(\d+)", src, re.S))
+          print(round(int(sizes["win"]) / 1e6), round(int(sizes["mac"]) / 1e6))
+          ')
+          cat > notes.md <<EOF
+          ## Downloads
+
+          | OS | File |
+          |---|---|
+          | Windows 10/11 (x64) | \`sign-manager-${TAG}-win.msi\` (installer) or \`-win.zip\` (portable) |
+          | macOS 14+ (Apple Silicon) | \`sign-manager-${TAG}-mac.dmg\` |
+          | Ubuntu 24.04+ / Debian 13 (x86_64) | \`sign-manager-${TAG}-linux-ubuntu.deb\` |
+          | Fedora 44+ (x86_64) | \`sign-manager-${TAG}-linux-fedora.rpm\` |
+          | Arch Linux (x86_64) | \`sign-manager-${TAG}-linux-arch.pkg.tar.zst\` |
+
+          ## First run
+
+          Sign Manager plays video with mpv and reads frames with ffmpeg; neither is inside the download.
+          On **Windows** and **macOS** the app offers to download them the first time it starts
+          (about ${WIN_MB} MB on Windows, ${MAC_MB} MB on macOS, from this repository's \`runtime-deps-1\` release,
+          checked against a pinned SHA-256). They go into your user data folder, not the app:
+          \`%LOCALAPPDATA%\\sign-manager\\runtime\` on Windows, \`~/Library/Application Support/sign-manager/runtime\` on macOS.
+          \`sign-manager --install-runtime-deps\` does the same from a terminal.
+          The **Linux** packages declare mpv and ffmpeg as dependencies, so your package manager installs them.
+
+          ## Notes
+
+          - **Windows:** the installer is not code-signed; SmartScreen may ask you to confirm (More info → Run anyway).
+          - **macOS:** the app is not notarized. Open it once with right-click → Open, or allow it under
+            System Settings → Privacy & Security, or run \`xattr -dr com.apple.quarantine "/Applications/Sign Manager.app"\`.
+          - **Fedora:** the stock \`ffmpeg-free\` cannot decode HEVC; install \`ffmpeg\` from [RPM Fusion](https://rpmfusion.org/) for H.265 video.
+          - Sign Manager was called **sub-label-pos**; your settings carry over on first start.
+
+          Verify downloads against \`SHA256SUMS.txt\`.
+          EOF
+          sed -i 's/^          //' notes.md
+          cat notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Sign Manager ${{ github.ref_name }}
+          body_path: notes.md
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/sign-manager-v*
+            dist/SHA256SUMS.txt
