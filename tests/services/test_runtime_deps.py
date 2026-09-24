@@ -163,11 +163,12 @@ def test_resolve_linux_uses_find_library(tmp_path):
         asked.append(name)
         return "libmpv.so.2"
 
+    bin_dir = tmp_path / "bin"
     tools = runtime_deps.resolve(
-        env=env, os_name="linux", which=lambda n, path=None: f"/usr/bin/{n}",
+        env=env, os_name="linux", which=lambda n, path=None: str(bin_dir / n),
         find_library=find_library,
     )
-    assert tools == RuntimeTools("/usr/bin/ffmpeg", "/usr/bin/ffprobe", "libmpv.so.2")
+    assert tools == RuntimeTools(str(bin_dir / "ffmpeg"), str(bin_dir / "ffprobe"), "libmpv.so.2")
     assert asked == ["mpv"]
 
 
