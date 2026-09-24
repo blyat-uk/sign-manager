@@ -12,9 +12,9 @@ the real slot bodies run; only the leaf widgets are faked.
 from pathlib import Path
 from types import SimpleNamespace
 
-from sub_label_pos.model.ass_file import AssFile
-from sub_label_pos.model.label_store import LabelStore
-from sub_label_pos.ui.controllers.label_edit_controller import LabelEditController
+from sign_manager.model.ass_file import AssFile
+from sign_manager.model.label_store import LabelStore
+from sign_manager.ui.controllers.label_edit_controller import LabelEditController
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "sample.ass"
 
@@ -48,7 +48,7 @@ class _Sidebar:
 
 def _window(qapp):
     """A MainWindow stand-in with its label-change signals really wired."""
-    from sub_label_pos.ui.main_window import MainWindow
+    from sign_manager.ui.main_window import MainWindow
 
     store = LabelStore()
     store.load(AssFile.from_path(FIXTURE), source_path=FIXTURE)

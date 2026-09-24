@@ -3,8 +3,8 @@
 from pathlib import Path
 import pytest
 
-from sub_label_pos.model.ass_file import AssFile
-from sub_label_pos.model.label_store import LabelStore
+from sign_manager.model.ass_file import AssFile
+from sign_manager.model.label_store import LabelStore
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "sample.ass"
 
@@ -99,8 +99,8 @@ def test_mark_clean_no_emit_when_already_clean(qapp):
     assert received == []
 
 
-from sub_label_pos.model.mutations import BatchMutation
-from sub_label_pos.model.types import LabelId
+from sign_manager.model.mutations import BatchMutation
+from sign_manager.model.types import LabelId
 
 
 def test_apply_emits_labels_mutated(qapp):
@@ -156,7 +156,7 @@ def test_apply_already_dirty_no_second_emit(qapp):
 
 
 def test_apply_delete_emits_labels_removed(qapp):
-    from sub_label_pos.model.mutations import DeleteLabel
+    from sign_manager.model.mutations import DeleteLabel
     store = LabelStore()
     store.load(AssFile.from_path(FIXTURE), source_path=FIXTURE)
     lid = store.state.order[0]
@@ -172,7 +172,7 @@ def test_apply_delete_emits_labels_removed(qapp):
 def test_apply_delete_prunes_dangling_selection(qapp):
     """Deleting a selected label must drop it from store.selected and
     fire selection_changed so subscribers stay consistent."""
-    from sub_label_pos.model.mutations import DeleteLabel
+    from sign_manager.model.mutations import DeleteLabel
     store = LabelStore()
     store.load(AssFile.from_path(FIXTURE), source_path=FIXTURE)
     lid_a, lid_b = store.state.order[0], store.state.order[1]
@@ -186,7 +186,7 @@ def test_apply_delete_prunes_dangling_selection(qapp):
 
 def test_apply_delete_unselected_no_selection_emit(qapp):
     """Deleting a label that isn't selected must NOT fire selection_changed."""
-    from sub_label_pos.model.mutations import DeleteLabel
+    from sign_manager.model.mutations import DeleteLabel
     store = LabelStore()
     store.load(AssFile.from_path(FIXTURE), source_path=FIXTURE)
     lid_a, lid_b = store.state.order[0], store.state.order[1]
@@ -200,7 +200,7 @@ def test_apply_delete_unselected_no_selection_emit(qapp):
 
 def test_undo_of_insert_prunes_dangling_selection(qapp):
     """Undoing an insert (which removes the label) must clean dangling selection."""
-    from sub_label_pos.model.mutations import DeleteLabel, InsertLabel
+    from sign_manager.model.mutations import DeleteLabel, InsertLabel
     store = LabelStore()
     store.load(AssFile.from_path(FIXTURE), source_path=FIXTURE)
     lid = store.state.order[0]
@@ -216,7 +216,7 @@ def test_undo_of_insert_prunes_dangling_selection(qapp):
 
 
 def test_apply_insert_emits_labels_added(qapp):
-    from sub_label_pos.model.mutations import DeleteLabel, InsertLabel
+    from sign_manager.model.mutations import DeleteLabel, InsertLabel
     store = LabelStore()
     store.load(AssFile.from_path(FIXTURE), source_path=FIXTURE)
     lid = store.state.order[0]
@@ -229,7 +229,7 @@ def test_apply_insert_emits_labels_added(qapp):
 
 
 def test_apply_move_still_emits_labels_mutated(qapp):
-    from sub_label_pos.model.mutations import MoveLabel
+    from sign_manager.model.mutations import MoveLabel
     store = LabelStore()
     store.load(AssFile.from_path(FIXTURE), source_path=FIXTURE)
     lid = store.state.order[0]
@@ -240,7 +240,7 @@ def test_apply_move_still_emits_labels_mutated(qapp):
 
 
 def test_apply_batch_dispatches_per_inner_mutation(qapp):
-    from sub_label_pos.model.mutations import BatchMutation, MoveLabel, DeleteLabel
+    from sign_manager.model.mutations import BatchMutation, MoveLabel, DeleteLabel
     store = LabelStore()
     store.load(AssFile.from_path(FIXTURE), source_path=FIXTURE)
     lid_move = store.state.order[0]
@@ -261,7 +261,7 @@ def test_apply_batch_dispatches_per_inner_mutation(qapp):
 def test_apply_batch_with_del_and_insert_same_id_emits_mutated_only(qapp):
     """When a batch deletes and re-inserts the same id, classifier
     collapses both to labels_mutated (avoid double-signal per id)."""
-    from sub_label_pos.model.mutations import BatchMutation, DeleteLabel, InsertLabel
+    from sign_manager.model.mutations import BatchMutation, DeleteLabel, InsertLabel
     store = LabelStore()
     store.load(AssFile.from_path(FIXTURE), source_path=FIXTURE)
     lid = store.state.order[0]
@@ -282,8 +282,8 @@ def test_apply_batch_with_del_and_insert_same_id_emits_mutated_only(qapp):
 
 
 def test_apply_duplicate_emits_labels_added(qapp):
-    from sub_label_pos.model.mutations import DuplicateLabel
-    from sub_label_pos.model.types import LabelId
+    from sign_manager.model.mutations import DuplicateLabel
+    from sign_manager.model.types import LabelId
     store = LabelStore()
     store.load(AssFile.from_path(FIXTURE), source_path=FIXTURE)
     src = store.state.order[0]
@@ -300,8 +300,8 @@ def test_apply_duplicate_emits_labels_added(qapp):
 
 
 def test_apply_merge_emits_added_for_merged_removed_for_sources(qapp):
-    from sub_label_pos.model.mutations import MergeLabels
-    from sub_label_pos.model.types import LabelId, LabelSnapshot
+    from sign_manager.model.mutations import MergeLabels
+    from sign_manager.model.types import LabelId, LabelSnapshot
     from dataclasses import replace as dc_replace
     store = LabelStore()
     store.load(AssFile.from_path(FIXTURE), source_path=FIXTURE)
@@ -327,8 +327,8 @@ def test_apply_merge_emits_added_for_merged_removed_for_sources(qapp):
 
 
 def test_apply_split_merged_emits_added_for_sources_removed_for_merged(qapp):
-    from sub_label_pos.model.mutations import MergeLabels, SplitMerged
-    from sub_label_pos.model.types import LabelId, LabelSnapshot
+    from sign_manager.model.mutations import MergeLabels, SplitMerged
+    from sign_manager.model.types import LabelId, LabelSnapshot
     from dataclasses import replace as dc_replace
     store = LabelStore()
     store.load(AssFile.from_path(FIXTURE), source_path=FIXTURE)
@@ -352,7 +352,7 @@ def test_apply_split_merged_emits_added_for_sources_removed_for_merged(qapp):
 
 
 def test_apply_records_inverse_on_undo_stack(qapp):
-    from sub_label_pos.model.mutations import MoveLabel
+    from sign_manager.model.mutations import MoveLabel
     store = LabelStore()
     store.load(AssFile.from_path(FIXTURE), source_path=FIXTURE)
     assert not store.undo_stack.can_undo
@@ -363,7 +363,7 @@ def test_apply_records_inverse_on_undo_stack(qapp):
 
 
 def test_undo_restores_state(qapp):
-    from sub_label_pos.model.mutations import MoveLabel
+    from sign_manager.model.mutations import MoveLabel
     store = LabelStore()
     store.load(AssFile.from_path(FIXTURE), source_path=FIXTURE)
     lid = store.state.order[0]
@@ -374,7 +374,7 @@ def test_undo_restores_state(qapp):
 
 
 def test_redo_reapplies(qapp):
-    from sub_label_pos.model.mutations import MoveLabel
+    from sign_manager.model.mutations import MoveLabel
     store = LabelStore()
     store.load(AssFile.from_path(FIXTURE), source_path=FIXTURE)
     lid = store.state.order[0]
@@ -387,7 +387,7 @@ def test_redo_reapplies(qapp):
 
 def test_undo_emits_kind_aware_signals(qapp):
     """Undoing a DeleteLabel should emit labels_added (reverse of the original)."""
-    from sub_label_pos.model.mutations import DeleteLabel
+    from sign_manager.model.mutations import DeleteLabel
     store = LabelStore()
     store.load(AssFile.from_path(FIXTURE), source_path=FIXTURE)
     lid = store.state.order[0]
@@ -403,7 +403,7 @@ def test_undo_emits_kind_aware_signals(qapp):
 
 
 def test_load_clears_undo_stack(qapp):
-    from sub_label_pos.model.mutations import MoveLabel
+    from sign_manager.model.mutations import MoveLabel
     store = LabelStore()
     store.load(AssFile.from_path(FIXTURE), source_path=FIXTURE)
     lid = store.state.order[0]

@@ -6,8 +6,8 @@ from pathlib import Path
 
 from PyQt6.QtCore import QEventLoop, QTimer
 
-from sub_label_pos.services.exceptions import VideoServiceError
-from sub_label_pos.ui.controllers.file_loader import FileLoader, VideoFilePair
+from sign_manager.services.exceptions import VideoServiceError
+from sign_manager.ui.controllers.file_loader import FileLoader, VideoFilePair
 
 
 class _OkSvc:

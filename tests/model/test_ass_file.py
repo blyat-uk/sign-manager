@@ -1,5 +1,5 @@
 from pathlib import Path
-from sub_label_pos.model.ass_file import AssFile
+from sign_manager.model.ass_file import AssFile
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "sample.ass"
 
@@ -37,7 +37,7 @@ def test_label_by_id_lookup():
 
 def test_from_state_roundtrip_preserves_labels():
     """Build an AssFile from a parsed state; the result should re-parse identically."""
-    from sub_label_pos.model.label_state import LabelState
+    from sign_manager.model.label_state import LabelState
     a = AssFile.from_path(FIXTURE)
     state = LabelState(
         labels={l.label_id: l for l in a.labels},
@@ -59,7 +59,7 @@ def test_from_state_roundtrip_preserves_labels():
 
 def test_from_state_default_header():
     """Without an explicit header, from_state synthesizes a usable one."""
-    from sub_label_pos.model.label_state import LabelState
+    from sign_manager.model.label_state import LabelState
     a = AssFile.from_path(FIXTURE)
     state = LabelState(
         labels={l.label_id: l for l in a.labels},
@@ -77,7 +77,7 @@ def test_from_state_default_header():
 
 def test_from_state_reflects_position_mutation():
     """A mutation applied via the state is reflected in the serialized output."""
-    from sub_label_pos.model.label_state import LabelState
+    from sign_manager.model.label_state import LabelState
     from dataclasses import replace
     a = AssFile.from_path(FIXTURE)
     state = LabelState(
@@ -100,7 +100,7 @@ def test_from_state_preserves_non_label_dialogue_lines(tmp_path):
     Regression: previously _save_ass discarded every Events-section line except
     labels, silently stripping the subtitle dialogue from the file.
     """
-    from sub_label_pos.model.label_state import LabelState
+    from sign_manager.model.label_state import LabelState
 
     src = (
         "[Script Info]\n"

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from sub_label_pos.model.text_transforms import TransformKind, apply
+from sign_manager.model.text_transforms import TransformKind, apply
 
 
 # ---------------------------------------------------------------------------

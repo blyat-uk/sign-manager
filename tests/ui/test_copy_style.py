@@ -8,7 +8,7 @@ The slot must copy everything when it is not handed a set of attributes.
 
 from types import SimpleNamespace
 
-from sub_label_pos.model.ass_file import LabelDialogue
+from sign_manager.model.ass_file import LabelDialogue
 
 
 ALL_ATTRS = {"font_size", "alignment", "bold", "italic", "style",
@@ -38,7 +38,7 @@ def _window(label: LabelDialogue) -> SimpleNamespace:
 
 def test_copy_style_with_no_selection_copies_everything(qapp):
     """Called with no argument (all attributes) the clipboard is fully populated."""
-    from sub_label_pos.ui.main_window import MainWindow
+    from sign_manager.ui.main_window import MainWindow
 
     win = _window(_label())
     MainWindow._on_copy_style(win)
@@ -48,7 +48,7 @@ def test_copy_style_with_no_selection_copies_everything(qapp):
 
 def test_copy_style_from_qaction_triggered_copies_everything(qapp):
     """QAction.triggered hands the slot its ``checked`` bool, not a set."""
-    from sub_label_pos.ui.main_window import MainWindow
+    from sign_manager.ui.main_window import MainWindow
 
     win = _window(_label())
     MainWindow._on_copy_style(win, False)
@@ -58,7 +58,7 @@ def test_copy_style_from_qaction_triggered_copies_everything(qapp):
 
 def test_copy_style_with_subset_copies_only_those_attributes(qapp):
     """An explicit attribute set leaves everything else out of the clipboard."""
-    from sub_label_pos.ui.main_window import MainWindow
+    from sign_manager.ui.main_window import MainWindow
 
     win = _window(_label())
     MainWindow._on_copy_style(win, {"font_size", "rotation"})

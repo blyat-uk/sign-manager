@@ -2,8 +2,8 @@
 
 from PyQt6.QtCore import QPointF, QRectF, Qt
 
-from sub_label_pos.geometry.drag import DragCandidate, DragSession
-from sub_label_pos.model.types import LabelId
+from sign_manager.geometry.drag import DragCandidate, DragSession
+from sign_manager.model.types import LabelId
 
 
 def _cands():

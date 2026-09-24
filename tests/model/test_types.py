@@ -1,6 +1,6 @@
 from dataclasses import FrozenInstanceError
 import pytest
-from sub_label_pos.model.types import LabelId, LabelSnapshot, StylePatch
+from sign_manager.model.types import LabelId, LabelSnapshot, StylePatch
 
 
 def test_style_patch_defaults_are_none():
@@ -31,12 +31,12 @@ def test_label_id_is_distinct_type():
 
 
 def test_new_label_id_returns_distinct_ids():
-    from sub_label_pos.model.types import new_label_id
+    from sign_manager.model.types import new_label_id
     ids = {new_label_id() for _ in range(100)}
     assert len(ids) == 100   # all unique
 
 
 def test_new_label_id_has_prefix():
-    from sub_label_pos.model.types import new_label_id
+    from sign_manager.model.types import new_label_id
     lid = new_label_id()
     assert lid.startswith("LD-")

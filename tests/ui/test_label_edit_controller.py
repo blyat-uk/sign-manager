@@ -10,10 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from sub_label_pos.model.ass_file import AssFile
-from sub_label_pos.model.label_store import LabelStore
-from sub_label_pos.model.types import StylePatch
-from sub_label_pos.ui.controllers.label_edit_controller import LabelEditController
+from sign_manager.model.ass_file import AssFile
+from sign_manager.model.label_store import LabelStore
+from sign_manager.model.types import StylePatch
+from sign_manager.ui.controllers.label_edit_controller import LabelEditController
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "sample.ass"
 

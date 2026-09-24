@@ -1,5 +1,5 @@
 import pytest
-from sub_label_pos.services.hardware_profile import _pick_tier, detect
+from sign_manager.services.hardware_profile import _pick_tier, detect
 
 
 @pytest.mark.parametrize("ram_gb,expected", [

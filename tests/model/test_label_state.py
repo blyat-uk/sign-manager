@@ -3,9 +3,9 @@
 from pathlib import Path
 import pytest
 
-from sub_label_pos.model.ass_file import AssFile
-from sub_label_pos.model.label_state import LabelState
-from sub_label_pos.model.types import LabelId
+from sign_manager.model.ass_file import AssFile
+from sign_manager.model.label_state import LabelState
+from sign_manager.model.types import LabelId
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "sample.ass"
 

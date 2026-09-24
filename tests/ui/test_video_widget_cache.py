@@ -3,7 +3,7 @@
 from pathlib import Path
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from sub_label_pos.model.label_store import LabelStore
+from sign_manager.model.label_store import LabelStore
 
 
 class _FakeFrameQueue(QObject):
@@ -39,7 +39,7 @@ class _FakeSvc:
 
 
 def test_cache_max_honours_constructor_arg(qapp):
-    from sub_label_pos.ui.video_widget import VideoFrameWidget
+    from sign_manager.ui.video_widget import VideoFrameWidget
     store = LabelStore()
     fq = _FakeFrameQueue()
     w = VideoFrameWidget(store, _FakeSvc(), frame_queue=fq, frame_cache_size=8)
@@ -47,7 +47,7 @@ def test_cache_max_honours_constructor_arg(qapp):
 
 
 def test_target_max_dim_rounds_to_256(qapp):
-    from sub_label_pos.ui.video_widget import VideoFrameWidget
+    from sign_manager.ui.video_widget import VideoFrameWidget
     store = LabelStore()
     fq = _FakeFrameQueue()
     w = VideoFrameWidget(store, _FakeSvc(), frame_queue=fq, frame_cache_size=16)
@@ -56,7 +56,7 @@ def test_target_max_dim_rounds_to_256(qapp):
 
 
 def test_show_time_cache_miss_dispatches_async(qapp, tmp_path):
-    from sub_label_pos.ui.video_widget import VideoFrameWidget
+    from sign_manager.ui.video_widget import VideoFrameWidget
     store = LabelStore()
     fq = _FakeFrameQueue()
     w = VideoFrameWidget(store, _FakeSvc(), frame_queue=fq, frame_cache_size=4)
@@ -69,7 +69,7 @@ def test_show_time_cache_miss_dispatches_async(qapp, tmp_path):
 
 
 def test_async_frame_drops_stale_seq(qapp, tmp_path):
-    from sub_label_pos.ui.video_widget import VideoFrameWidget
+    from sign_manager.ui.video_widget import VideoFrameWidget
     store = LabelStore()
     fq = _FakeFrameQueue()
     w = VideoFrameWidget(store, _FakeSvc(), frame_queue=fq, frame_cache_size=4)
@@ -85,8 +85,8 @@ def test_async_frame_drops_stale_seq(qapp, tmp_path):
 def test_render_cache_populates_and_reuses(qapp):
     """First paintEvent on a label builds and caches; subsequent paints hit cache."""
     from pathlib import Path
-    from sub_label_pos.ui.video_widget import VideoFrameWidget
-    from sub_label_pos.model.ass_file import AssFile
+    from sign_manager.ui.video_widget import VideoFrameWidget
+    from sign_manager.model.ass_file import AssFile
     store = LabelStore()
     fq = _FakeFrameQueue()
     w = VideoFrameWidget(store, _FakeSvc(), frame_queue=fq, frame_cache_size=4)
@@ -101,15 +101,15 @@ def test_render_cache_populates_and_reuses(qapp):
     w._render_cache[lid] = rc
     assert lid in w._render_cache
     # Mutate that label -> cache entry should be popped
-    from sub_label_pos.model.mutations import MoveLabel
+    from sign_manager.model.mutations import MoveLabel
     store.apply(MoveLabel(label_id=lid, new_x=999, new_y=999))
     assert lid not in w._render_cache
 
 
 def test_render_cache_cleared_on_file_load(qapp):
     from pathlib import Path
-    from sub_label_pos.ui.video_widget import VideoFrameWidget
-    from sub_label_pos.model.ass_file import AssFile
+    from sign_manager.ui.video_widget import VideoFrameWidget
+    from sign_manager.model.ass_file import AssFile
     store = LabelStore()
     fq = _FakeFrameQueue()
     w = VideoFrameWidget(store, _FakeSvc(), frame_queue=fq, frame_cache_size=4)
@@ -128,7 +128,7 @@ def test_render_cache_cleared_on_file_load(qapp):
 
 def test_drag_layer_starts_none(qapp):
     """Issue M: drag layer defaults to empty / no dragged ids."""
-    from sub_label_pos.ui.video_widget import VideoFrameWidget
+    from sign_manager.ui.video_widget import VideoFrameWidget
     store = LabelStore()
     fq = _FakeFrameQueue()
     w = VideoFrameWidget(store, _FakeSvc(), frame_queue=fq, frame_cache_size=4)
@@ -138,7 +138,7 @@ def test_drag_layer_starts_none(qapp):
 
 def test_drag_layer_invalidates_on_scaled_pixmap_change(qapp):
     """Issue M: changing the frame pixmap clears the stale drag layer."""
-    from sub_label_pos.ui.video_widget import VideoFrameWidget
+    from sign_manager.ui.video_widget import VideoFrameWidget
     from PyQt6.QtGui import QPixmap
     store = LabelStore()
     fq = _FakeFrameQueue()
@@ -157,8 +157,8 @@ def test_drag_layer_invalidates_on_scaled_pixmap_change(qapp):
 def test_drag_layer_invalidates_on_file_load(qapp):
     """Issue M: loading a new file drops the stale drag layer."""
     from pathlib import Path
-    from sub_label_pos.ui.video_widget import VideoFrameWidget
-    from sub_label_pos.model.ass_file import AssFile
+    from sign_manager.ui.video_widget import VideoFrameWidget
+    from sign_manager.model.ass_file import AssFile
     from PyQt6.QtGui import QPixmap
     store = LabelStore()
     fq = _FakeFrameQueue()
@@ -174,8 +174,8 @@ def test_drag_layer_invalidates_on_file_load(qapp):
 def test_drag_layer_invalidates_on_set_ass(qapp):
     """Issue M: swapping the AssFile drops the stale drag layer."""
     from pathlib import Path
-    from sub_label_pos.ui.video_widget import VideoFrameWidget
-    from sub_label_pos.model.ass_file import AssFile
+    from sign_manager.ui.video_widget import VideoFrameWidget
+    from sign_manager.model.ass_file import AssFile
     from PyQt6.QtGui import QPixmap
     store = LabelStore()
     fq = _FakeFrameQueue()
@@ -190,7 +190,7 @@ def test_drag_layer_invalidates_on_set_ass(qapp):
 
 def test_drag_layer_invalidates_on_resize(qapp):
     """Issue M: widget resize invalidates the drag layer explicitly."""
-    from sub_label_pos.ui.video_widget import VideoFrameWidget
+    from sign_manager.ui.video_widget import VideoFrameWidget
     from PyQt6.QtGui import QPixmap
     from PyQt6.QtCore import QSize
     from PyQt6.QtGui import QResizeEvent
@@ -209,7 +209,7 @@ def test_drag_layer_invalidates_on_resize(qapp):
 def test_drag_layer_kept_when_only_dragged_id_mutated(qapp):
     """Issue M: mutations on the dragged id alone do NOT invalidate the layer
     (the layer caches everything OTHER than the dragged labels)."""
-    from sub_label_pos.ui.video_widget import VideoFrameWidget
+    from sign_manager.ui.video_widget import VideoFrameWidget
     from PyQt6.QtGui import QPixmap
     store = LabelStore()
     fq = _FakeFrameQueue()
@@ -227,7 +227,7 @@ def test_frame_prefetch_worker_threads_max_dim(qapp, tmp_path):
     """Fix 1: FramePrefetchWorker passes max_dim through to get_frame so
     prefetched pixmaps live in the same downscaled bucket as the editor's
     sync/async paths."""
-    from sub_label_pos.ui.video_widget import FramePrefetchWorker
+    from sign_manager.ui.video_widget import FramePrefetchWorker
 
     calls: list[tuple] = []
 
@@ -249,7 +249,7 @@ def test_frame_prefetch_worker_threads_max_dim(qapp, tmp_path):
 def test_drag_layer_invalidated_when_non_dragged_id_mutated(qapp):
     """Issue M: mutations on a non-dragged id mid-gesture invalidate the
     layer so the next paintEvent rebuilds it with the fresh appearance."""
-    from sub_label_pos.ui.video_widget import VideoFrameWidget
+    from sign_manager.ui.video_widget import VideoFrameWidget
     from PyQt6.QtGui import QPixmap
     store = LabelStore()
     fq = _FakeFrameQueue()
@@ -263,8 +263,8 @@ def test_drag_layer_invalidated_when_non_dragged_id_mutated(qapp):
 
 def _loaded_widget(qapp):
     """Build a VideoFrameWidget with the sample fixture loaded into its store."""
-    from sub_label_pos.model.ass_file import AssFile
-    from sub_label_pos.ui.video_widget import VideoFrameWidget
+    from sign_manager.model.ass_file import AssFile
+    from sign_manager.ui.video_widget import VideoFrameWidget
     fixture = Path(__file__).parent.parent / "fixtures" / "sample.ass"
     ass = AssFile(str(fixture))
     store = LabelStore()

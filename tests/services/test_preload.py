@@ -4,11 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from sub_label_pos.services.exceptions import (
+from sign_manager.services.exceptions import (
     FrameExtractionError,
     VideoFormatError,
 )
-from sub_label_pos.services.preload import (
+from sign_manager.services.preload import (
     FilePreloadTask,
     PreloadSignals,
 )

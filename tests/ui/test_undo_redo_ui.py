@@ -2,9 +2,9 @@
 
 from pathlib import Path
 
-from sub_label_pos.model.ass_file import AssFile
-from sub_label_pos.model.label_store import LabelStore
-from sub_label_pos.model.mutations import MoveLabel
+from sign_manager.model.ass_file import AssFile
+from sign_manager.model.label_store import LabelStore
+from sign_manager.model.mutations import MoveLabel
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "sample.ass"
 

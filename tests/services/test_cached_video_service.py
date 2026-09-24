@@ -3,9 +3,9 @@
 import pytest
 from pathlib import Path
 
-from sub_label_pos.services.frame_cache import FrameCache
-from sub_label_pos.services.video_service import CachedVideoService
-from sub_label_pos.services.exceptions import FrameExtractionError
+from sign_manager.services.frame_cache import FrameCache
+from sign_manager.services.video_service import CachedVideoService
+from sign_manager.services.exceptions import FrameExtractionError
 
 
 def test_cached_get_frame_hits_inner_once(mocker):

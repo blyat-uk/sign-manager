@@ -7,11 +7,11 @@ import pytest
 from PyQt6.QtCore import QPointF
 from PyQt6.QtGui import QFont
 
-from sub_label_pos.geometry.label_geometry import (
+from sign_manager.geometry.label_geometry import (
     compute_label_rect,
     libass_font_correction,
 )
-from sub_label_pos.model.ass_file import AssFile
+from sign_manager.model.ass_file import AssFile
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "sample.ass"
 

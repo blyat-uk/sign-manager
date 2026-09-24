@@ -7,10 +7,10 @@ list keeps showing labels that no longer exist.
 
 from pathlib import Path
 
-from sub_label_pos.model.ass_file import AssFile
-from sub_label_pos.model.label_store import LabelStore
-from sub_label_pos.ui.controllers.label_edit_controller import LabelEditController
-from sub_label_pos.ui.labels_sidebar import LabelsSidebar
+from sign_manager.model.ass_file import AssFile
+from sign_manager.model.label_store import LabelStore
+from sign_manager.ui.controllers.label_edit_controller import LabelEditController
+from sign_manager.ui.labels_sidebar import LabelsSidebar
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "sample.ass"
 

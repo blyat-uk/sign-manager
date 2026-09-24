@@ -5,13 +5,13 @@ from dataclasses import replace
 
 import pytest
 
-from sub_label_pos.model.ass_file import AssFile, LabelDialogue
-from sub_label_pos.model.groups import DerivedGroupModel, LabelGroup
-from sub_label_pos.model.label_store import LabelStore
-from sub_label_pos.model.mutations import (
+from sign_manager.model.ass_file import AssFile, LabelDialogue
+from sign_manager.model.groups import DerivedGroupModel, LabelGroup
+from sign_manager.model.label_store import LabelStore
+from sign_manager.model.mutations import (
     MoveLabel, DeleteLabel, RetimeLabel, InsertLabel,
 )
-from sub_label_pos.model.types import LabelId, LabelSnapshot, new_label_id
+from sign_manager.model.types import LabelId, LabelSnapshot, new_label_id
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "sample.ass"
 

@@ -10,14 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from sub_label_pos.model.ass_file import AssFile
-from sub_label_pos.model.label_state import LabelState
-from sub_label_pos.model.mutations import (
+from sign_manager.model.ass_file import AssFile
+from sign_manager.model.label_state import LabelState
+from sign_manager.model.mutations import (
     MoveLabel, ResizeLabel, RotateLabel, EditText, ChangeStyle, PasteStyle,
     RetimeLabel, DeleteLabel, InsertLabel, DuplicateLabel,
     MergeLabels, SplitMerged,
 )
-from sub_label_pos.model.types import LabelId, LabelSnapshot, StylePatch, new_label_id
+from sign_manager.model.types import LabelId, LabelSnapshot, StylePatch, new_label_id
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "sample.ass"
 

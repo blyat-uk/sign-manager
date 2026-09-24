@@ -12,10 +12,10 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtGui import QPainter, QPixmap
 
-from sub_label_pos.model.ass_file import AssFile
-from sub_label_pos.model.label_store import LabelStore
-from sub_label_pos.model.mutations import DuplicateLabel
-from sub_label_pos.model.types import LabelId
+from sign_manager.model.ass_file import AssFile
+from sign_manager.model.label_store import LabelStore
+from sign_manager.model.mutations import DuplicateLabel
+from sign_manager.model.types import LabelId
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "sample.ass"
 
@@ -46,7 +46,7 @@ class _FakeSvc:
 
 
 def _make_widget():
-    from sub_label_pos.ui.video_widget import VideoFrameWidget
+    from sign_manager.ui.video_widget import VideoFrameWidget
 
     store = LabelStore()
     ass = AssFile.from_path(FIXTURE)

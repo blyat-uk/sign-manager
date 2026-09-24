@@ -6,7 +6,7 @@ they stay fast and don't require a working OpenGL context or ffmpeg.
 
 from unittest.mock import Mock
 
-from sub_label_pos.ui.controllers.playback_orchestrator import PlaybackOrchestrator
+from sign_manager.ui.controllers.playback_orchestrator import PlaybackOrchestrator
 
 
 def _make_mpv_mock(*, is_file_loaded: bool = True, time_pos: float = 0.0) -> Mock:

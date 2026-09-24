@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from sub_label_pos.services.exceptions import (
+from sign_manager.services.exceptions import (
     FFmpegNotFoundError, VideoFormatError,
     FrameExtractionError, FrameExtractionTimeoutError,
 )
-from sub_label_pos.services.ffmpeg_service import FFmpegVideoService
+from sign_manager.services.ffmpeg_service import FFmpegVideoService
 
 
 # --- get_dimensions ---------------------------------------------------

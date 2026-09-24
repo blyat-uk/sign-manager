@@ -3,7 +3,7 @@
 import pytest
 from PyQt6.QtCore import QPointF
 
-from sub_label_pos.geometry.coords import ass_to_widget, widget_to_ass, scale_factor
+from sign_manager.geometry.coords import ass_to_widget, widget_to_ass, scale_factor
 
 
 def test_scale_uniform_to_matched_aspect():

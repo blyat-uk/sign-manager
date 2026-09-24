@@ -2,7 +2,7 @@
 
 import pytest
 
-from sub_label_pos.geometry.frame_time import (
+from sign_manager.geometry.frame_time import (
     frame_to_seconds,
     seconds_to_frame,
     snap_to_centisecond,

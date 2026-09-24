@@ -1,8 +1,8 @@
 """Tests for the Mutation Protocol and BatchMutation."""
 
-from sub_label_pos.model.label_state import LabelState
-from sub_label_pos.model.mutations import BatchMutation
-from sub_label_pos.model.types import LabelId
+from sign_manager.model.label_state import LabelState
+from sign_manager.model.mutations import BatchMutation
+from sign_manager.model.types import LabelId
 
 
 class _Dummy:

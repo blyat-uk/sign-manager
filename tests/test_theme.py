@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from sub_label_pos.ui import theme
+from sign_manager.ui import theme
 
 
 def test_color_tokens_present():

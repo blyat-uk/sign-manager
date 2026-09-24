@@ -1,8 +1,8 @@
 """Tests for the app_settings module."""
 from pathlib import Path
 
-from sub_label_pos.services import app_settings
-from sub_label_pos.services.app_settings import (
+from sign_manager.services import app_settings
+from sign_manager.services.app_settings import (
     AppSettings, DisplaySettings, PerfSettings, save, save_display, load,
 )
 
@@ -73,7 +73,7 @@ def test_legacy_settings_file_without_display_block(tmp_path: Path):
 
 
 def test_settings_dialog_constructs(qapp):
-    from sub_label_pos.ui.settings_dialog import SettingsDialog
+    from sign_manager.ui.settings_dialog import SettingsDialog
     s = AppSettings()  # defaults
     d = SettingsDialog(s)
     assert d.windowTitle() == "Preferences"

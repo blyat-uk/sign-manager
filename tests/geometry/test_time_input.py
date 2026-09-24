@@ -2,7 +2,7 @@
 
 import pytest
 
-from sub_label_pos.geometry.time_input import parse_time_input, parse_relative_delta
+from sign_manager.geometry.time_input import parse_time_input, parse_relative_delta
 
 
 # --- Absolute forms ---

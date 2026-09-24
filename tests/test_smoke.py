@@ -3,11 +3,11 @@ def test_pytest_works():
 
 
 def test_retime_bar_constructs_hidden_with_empty_selection(qapp):
-    from sub_label_pos.model.ass_file import AssFile
-    from sub_label_pos.model.label_store import LabelStore
-    from sub_label_pos.ui.controllers.label_edit_controller import LabelEditController
-    from sub_label_pos.ui.controllers.retime_controller import RetimeController
-    from sub_label_pos.ui.retime_bar import RetimeBar
+    from sign_manager.model.ass_file import AssFile
+    from sign_manager.model.label_store import LabelStore
+    from sign_manager.ui.controllers.label_edit_controller import LabelEditController
+    from sign_manager.ui.controllers.retime_controller import RetimeController
+    from sign_manager.ui.retime_bar import RetimeBar
     from pathlib import Path
 
     fixture = Path(__file__).parent / "fixtures" / "sample.ass"
@@ -23,11 +23,11 @@ def test_retime_bar_constructs_hidden_with_empty_selection(qapp):
 
 
 def test_retime_bar_becomes_visible_on_selection(qapp):
-    from sub_label_pos.model.ass_file import AssFile
-    from sub_label_pos.model.label_store import LabelStore
-    from sub_label_pos.ui.controllers.label_edit_controller import LabelEditController
-    from sub_label_pos.ui.controllers.retime_controller import RetimeController
-    from sub_label_pos.ui.retime_bar import RetimeBar
+    from sign_manager.model.ass_file import AssFile
+    from sign_manager.model.label_store import LabelStore
+    from sign_manager.ui.controllers.label_edit_controller import LabelEditController
+    from sign_manager.ui.controllers.retime_controller import RetimeController
+    from sign_manager.ui.retime_bar import RetimeBar
     from pathlib import Path
 
     fixture = Path(__file__).parent / "fixtures" / "sample.ass"
@@ -46,11 +46,11 @@ def test_retime_bar_becomes_visible_on_selection(qapp):
 
 
 def test_focused_timeline_constructs_hidden_with_empty_selection(qapp):
-    from sub_label_pos.model.ass_file import AssFile
-    from sub_label_pos.model.label_store import LabelStore
-    from sub_label_pos.ui.controllers.label_edit_controller import LabelEditController
-    from sub_label_pos.ui.controllers.retime_controller import RetimeController
-    from sub_label_pos.ui.focused_timeline import FocusedTimeline
+    from sign_manager.model.ass_file import AssFile
+    from sign_manager.model.label_store import LabelStore
+    from sign_manager.ui.controllers.label_edit_controller import LabelEditController
+    from sign_manager.ui.controllers.retime_controller import RetimeController
+    from sign_manager.ui.focused_timeline import FocusedTimeline
     from pathlib import Path
 
     fixture = Path(__file__).parent / "fixtures" / "sample.ass"
@@ -66,11 +66,11 @@ def test_focused_timeline_constructs_hidden_with_empty_selection(qapp):
 
 
 def test_focused_timeline_fits_to_selection_when_selected(qapp):
-    from sub_label_pos.model.ass_file import AssFile
-    from sub_label_pos.model.label_store import LabelStore
-    from sub_label_pos.ui.controllers.label_edit_controller import LabelEditController
-    from sub_label_pos.ui.controllers.retime_controller import RetimeController
-    from sub_label_pos.ui.focused_timeline import FocusedTimeline
+    from sign_manager.model.ass_file import AssFile
+    from sign_manager.model.label_store import LabelStore
+    from sign_manager.ui.controllers.label_edit_controller import LabelEditController
+    from sign_manager.ui.controllers.retime_controller import RetimeController
+    from sign_manager.ui.focused_timeline import FocusedTimeline
     from pathlib import Path
 
     fixture = Path(__file__).parent / "fixtures" / "sample.ass"

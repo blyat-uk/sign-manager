@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from sub_label_pos.model.label_rows import (
+from sign_manager.model.label_rows import (
     LabelGroupRow, group_labels_by_exact_timing,
 )
 

@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from sub_label_pos.model.undo_stack import UndoStack
+from sign_manager.model.undo_stack import UndoStack
 
 
 # Lightweight stand-in for Mutation (UndoStack doesn't need real apply/invert)

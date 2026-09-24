@@ -1,12 +1,12 @@
 """Tests for ASS<->HTML<->segments rich-text conversions."""
 
-from sub_label_pos.geometry.rich_text import (
+from sign_manager.geometry.rich_text import (
     html_to_segments,
     parse_rich_text,
     segments_to_ass,
     segments_to_html,
 )
-from sub_label_pos.model.ass_file import TextSegment
+from sign_manager.model.ass_file import TextSegment
 
 
 def test_plain_text_roundtrip_through_segments():
@@ -169,7 +169,7 @@ def test_default_bold_does_not_emit_tag():
 
 def test_re_export_from_ass_file_still_works():
     """Existing callers that import from model.ass_file keep working."""
-    from sub_label_pos.model.ass_file import (
+    from sign_manager.model.ass_file import (
         parse_rich_text as p2,
         segments_to_ass as s2,
         segments_to_html as h2,

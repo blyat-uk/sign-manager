@@ -1,6 +1,6 @@
 """Tests for FrameCache — LRU with eviction and recency promotion."""
 
-from sub_label_pos.services.frame_cache import FrameCache
+from sign_manager.services.frame_cache import FrameCache
 
 
 def test_get_returns_none_for_missing():

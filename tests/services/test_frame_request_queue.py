@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from PyQt6.QtCore import QCoreApplication, QEventLoop, QTimer
 
-from sub_label_pos.services.frame_request_queue import FrameRequestQueue
+from sign_manager.services.frame_request_queue import FrameRequestQueue
 
 
 @pytest.fixture(scope="session")
@@ -31,7 +31,7 @@ class _SuccessSvc:
 
 class _FailSvc:
     def get_frame(self, path, seconds):
-        from sub_label_pos.services.exceptions import FrameExtractionError
+        from sign_manager.services.exceptions import FrameExtractionError
         raise FrameExtractionError("bad")
 
 

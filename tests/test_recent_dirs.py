@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sub_label_pos.ui import recent_dirs
+from sign_manager.ui import recent_dirs
 
 
 def test_migrate_legacy_string_list():

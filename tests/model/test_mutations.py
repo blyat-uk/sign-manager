@@ -4,14 +4,14 @@ from dataclasses import replace as dc_replace
 from pathlib import Path
 import pytest
 
-from sub_label_pos.model.ass_file import AssFile
-from sub_label_pos.model.label_state import LabelState
-from sub_label_pos.model.mutations import (
+from sign_manager.model.ass_file import AssFile
+from sign_manager.model.label_state import LabelState
+from sign_manager.model.mutations import (
     MoveLabel, ResizeLabel, RotateLabel, EditText, ChangeStyle, PasteStyle,
     RetimeLabel, DeleteLabel, InsertLabel, DuplicateLabel,
     MergeLabels, SplitMerged,
 )
-from sub_label_pos.model.types import LabelSnapshot, StylePatch, LabelId, new_label_id
+from sign_manager.model.types import LabelSnapshot, StylePatch, LabelId, new_label_id
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "sample.ass"
 
@@ -548,14 +548,14 @@ def test_merge_coalesce_key_is_none(state):
 
 
 def test_batch_mutation_default_coalesce_key_is_none(state):
-    from sub_label_pos.model.mutations import BatchMutation
+    from sign_manager.model.mutations import BatchMutation
     lid = state.order[0]
     b = BatchMutation([RetimeLabel(label_id=lid, new_start=0.0, new_end=1.0)])
     assert b.coalesce_key is None
 
 
 def test_batch_mutation_with_coalesce_key_exposes_it(state):
-    from sub_label_pos.model.mutations import BatchMutation
+    from sign_manager.model.mutations import BatchMutation
     lid = state.order[0]
     b = BatchMutation(
         [RetimeLabel(label_id=lid, new_start=0.0, new_end=1.0)],

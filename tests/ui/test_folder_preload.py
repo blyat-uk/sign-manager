@@ -10,7 +10,7 @@ def FolderPreloadWorker(qapp):
     """Import FolderPreloadWorker lazily: importing main_window at module
     collection time instantiates QShortcut/QKeySequence, which needs a
     live QApplication. The session-scoped ``qapp`` fixture guarantees one."""
-    from sub_label_pos.ui.main_window import FolderPreloadWorker as _FPW
+    from sign_manager.ui.main_window import FolderPreloadWorker as _FPW
     return _FPW
 
 

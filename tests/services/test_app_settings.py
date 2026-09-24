@@ -1,10 +1,10 @@
 import json
 from pathlib import Path
 
-from sub_label_pos.services.app_settings import (
+from sign_manager.services.app_settings import (
     AppSettings, PerfSettings, load, save, from_profile, _TIER_DEFAULTS,
 )
-from sub_label_pos.services.hardware_profile import HardwareProfile
+from sign_manager.services.hardware_profile import HardwareProfile
 
 
 def test_save_load_roundtrip(tmp_path):
@@ -89,7 +89,7 @@ def test_preload_ring_roundtrips_through_save_load(tmp_path):
 
 
 def test_save_perf_preserves_other_fields(tmp_path):
-    from sub_label_pos.services.app_settings import save_perf
+    from sign_manager.services.app_settings import save_perf
     p = tmp_path / "settings.json"
     original = AppSettings(
         perf=PerfSettings(thumb_max_dim=800, gallery_enabled=True, mpv_quality="high"),
