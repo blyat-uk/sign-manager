@@ -52,14 +52,14 @@ class Artifact:
 MANIFEST: dict[tuple[str, str], Artifact] = {
     ("win", "x86_64"): Artifact(
         url=f"{_RELEASE_BASE}/{APP_SLUG}-deps-win-x86_64.zip",
-        sha256="0" * 64,
-        size=0,
+        sha256="8a40ab41c660e461f0af7786a1cce079122f9db01602c3313c5d394b557b0f34",
+        size=126_174_414,
         contents=("libmpv-2.dll", "ffmpeg.exe", "ffprobe.exe"),
     ),
     ("mac", "arm64"): Artifact(
         url=f"{_RELEASE_BASE}/{APP_SLUG}-deps-mac-arm64.zip",
-        sha256="0" * 64,
-        size=0,
+        sha256="94b50e2e672278c81b586501114f28cea673169541f35360452cf35a79f846bb",
+        size=27_337_932,
         contents=("libmpv.dylib", "ffmpeg", "ffprobe"),
     ),
 }

@@ -242,10 +242,8 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           read -r WIN_MB MAC_MB < <(PYTHONPATH=src python3 -c '
-          import ast, pathlib, re
-          src = pathlib.Path("src/sign_manager/services/runtime_download.py").read_text()
-          sizes = dict(re.findall(r"\(\"(win|mac)\", \"\w+\"\): Artifact\(.*?size=(\d+)", src, re.S))
-          print(round(int(sizes["win"]) / 1e6), round(int(sizes["mac"]) / 1e6))
+          from sign_manager.services.runtime_download import MANIFEST
+          print(round(MANIFEST[("win", "x86_64")].size / 1e6), round(MANIFEST[("mac", "arm64")].size / 1e6))
           ')
           cat > notes.md <<EOF
           ## Downloads
