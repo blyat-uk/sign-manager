@@ -28,6 +28,7 @@ dev = [
 sign-manager = "sign_manager.app:main"
 
 [project.urls]
+Homepage = "https://sign-manager.blyat.uk"
 Repository = "https://github.com/blyat-uk/sign-manager"
 
 [tool.hatch.build.targets.wheel]

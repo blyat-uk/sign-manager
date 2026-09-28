@@ -2,6 +2,8 @@
 
 A desktop application for visually editing sign/label positions in ASS subtitle files. Load a video alongside its `.ass` file, then drag labels directly on the video frame to reposition them.
 
+Website: **[sign-manager.blyat.uk](https://sign-manager.blyat.uk)**
+
 <p align="center">
   <img src="assets/screenshots/01-editor.png" alt="Editor with a video loaded, labels list on the right, gallery at the bottom, and a label selected on the canvas">
 </p>
