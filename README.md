@@ -39,8 +39,8 @@ Get the latest build from the [Releases page](https://github.com/blyat-uk/sign-m
 Verify downloads against `SHA256SUMS.txt` in the release.
 
 - **Windows:** the installer is not code-signed; SmartScreen may ask you to confirm (More info → Run anyway).
-- **macOS:** the app is not notarized. Open it once with right-click → Open, or run
-  `xattr -dr com.apple.quarantine "/Applications/Sign Manager.app"`.
+- **macOS:** the app is not notarized. Open it once with right-click → Open, allow it under
+  System Settings → Privacy & Security, or run `xattr -dr com.apple.quarantine "/Applications/Sign Manager.app"`.
 - **Fedora:** the stock `ffmpeg-free` cannot decode HEVC; install `ffmpeg` from [RPM Fusion](https://rpmfusion.org/) for H.265 video.
 
 ## First run

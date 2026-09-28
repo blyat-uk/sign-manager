@@ -224,7 +224,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Full history and tags: the changelog is every commit since the
+      # previous tag.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/download-artifact@v4
         with:
@@ -237,53 +241,41 @@ jobs:
           sha256sum sign-manager-v* > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
+      # The release page is the Downloads table and the changelog, nothing
+      # else. First run and platform notes live in README.md.
       - name: Release notes
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          read -r WIN_MB MAC_MB < <(PYTHONPATH=src python3 -c '
-          from sign_manager.services.runtime_download import MANIFEST
-          print(round(MANIFEST[("win", "x86_64")].size / 1e6), round(MANIFEST[("mac", "arm64")].size / 1e6))
-          ')
           cat > notes.md <<EOF
           ## Downloads
 
-          | OS | File |
+          | File | For |
           |---|---|
-          | Windows 10/11 (x64) | \`sign-manager-${TAG}-win.msi\` (installer) or \`-win.zip\` (portable) |
-          | macOS 14+ (Apple Silicon) | \`sign-manager-${TAG}-mac.dmg\` |
-          | Ubuntu 24.04+ / Debian 13 (x86_64) | \`sign-manager-${TAG}-linux-ubuntu.deb\` |
-          | Fedora 44+ (x86_64) | \`sign-manager-${TAG}-linux-fedora.rpm\` |
-          | Arch Linux (x86_64) | \`sign-manager-${TAG}-linux-arch.pkg.tar.zst\` |
+          | \`sign-manager-$TAG-win.msi\` | Windows 10/11 (x64): installer |
+          | \`sign-manager-$TAG-win.zip\` | Windows 10/11 (x64): portable, no install |
+          | \`sign-manager-$TAG-mac.dmg\` | macOS 14+ (Apple Silicon) |
+          | \`sign-manager-$TAG-linux-ubuntu.deb\` | Linux x86_64: Ubuntu 24.04+, Debian 13 |
+          | \`sign-manager-$TAG-linux-fedora.rpm\` | Linux x86_64: Fedora 44+ |
+          | \`sign-manager-$TAG-linux-arch.pkg.tar.zst\` | Linux x86_64: Arch Linux |
+          | \`SHA256SUMS.txt\` | SHA-256 checksums of every file above |
 
-          ## First run
+          ## Changelog
 
-          Sign Manager plays video with mpv and reads frames with ffmpeg; neither is inside the download.
-          On **Windows** and **macOS** the app offers to download them the first time it starts
-          (about ${WIN_MB} MB on Windows, ${MAC_MB} MB on macOS, from this repository's \`runtime-deps-1\` release,
-          checked against a pinned SHA-256). They go into your user data folder, not the app:
-          \`%LOCALAPPDATA%\\sign-manager\\runtime\` on Windows, \`~/Library/Application Support/sign-manager/runtime\` on macOS.
-          \`sign-manager --install-runtime-deps\` does the same from a terminal.
-          The **Linux** packages declare mpv and ffmpeg as dependencies, so your package manager installs them.
-
-          ## Notes
-
-          - **Windows:** the installer is not code-signed; SmartScreen may ask you to confirm (More info → Run anyway).
-          - **macOS:** the app is not notarized. Open it once with right-click → Open, or allow it under
-            System Settings → Privacy & Security, or run \`xattr -dr com.apple.quarantine "/Applications/Sign Manager.app"\`.
-          - **Fedora:** the stock \`ffmpeg-free\` cannot decode HEVC; install \`ffmpeg\` from [RPM Fusion](https://rpmfusion.org/) for H.265 video.
-          - Sign Manager was called **sub-label-pos**; your settings carry over on first start.
-
-          Verify downloads against \`SHA256SUMS.txt\`.
           EOF
-          sed -i 's/^          //' notes.md
+          # Since the previous v* tag, or all history for the first release.
+          # A commit that is only the version ("chore(release): 1.2.3") is the
+          # bump the tag sits on, not a change.
+          prev=$(git describe --tags --abbrev=0 --match 'v*' "$TAG^" 2>/dev/null || true)
+          git log --no-merges --format='- %s (%h)' "${prev:+$prev..}$TAG" \
+            | grep -Eiv '^- (chore(\(release\))?: )?((release|bump version to) )?v?[0-9]+\.[0-9]+\.[0-9]+ \(' >> notes.md \
+            || echo "- No changes." >> notes.md
           cat notes.md
 
       - uses: softprops/action-gh-release@v2
         with:
           name: Sign Manager ${{ github.ref_name }}
           body_path: notes.md
-          generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
             dist/sign-manager-v*
