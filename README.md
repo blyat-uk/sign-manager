@@ -1,5 +1,3 @@
-<p align="center"><img src="src/sign_manager/resources/icons/sign-manager-128.png" width="96" alt=""></p>
-
 # Sign Manager
 
 A desktop application for visually editing sign/label positions in ASS subtitle files. Load a video alongside its `.ass` file, then drag labels directly on the video frame to reposition them.
@@ -28,13 +26,13 @@ A desktop application for visually editing sign/label positions in ASS subtitle 
 
 Get the latest build from the [Releases page](https://github.com/blyat-uk/sign-manager/releases/latest):
 
-| OS | File |
-|---|---|
-| Windows 10/11 (x64) | `sign-manager-vX.Y.Z-win.msi` (installer) or `-win.zip` (portable) |
-| macOS 14+ (Apple Silicon) | `sign-manager-vX.Y.Z-mac.dmg` |
-| Ubuntu 24.04+ / Debian 13 | `sign-manager-vX.Y.Z-linux-ubuntu.deb` — `sudo apt install ./sign-manager-*.deb` |
-| Fedora | `sign-manager-vX.Y.Z-linux-fedora.rpm` — `sudo dnf install ./sign-manager-*.rpm` |
-| Arch Linux | `sign-manager-vX.Y.Z-linux-arch.pkg.tar.zst` — `sudo pacman -U ./sign-manager-*.pkg.tar.zst` |
+| OS                        | File                                                                                         |
+| ------------------------- | -------------------------------------------------------------------------------------------- |
+| Windows 10/11 (x64)       | `sign-manager-vX.Y.Z-win.msi` (installer) or `-win.zip` (portable)                           |
+| macOS 14+ (Apple Silicon) | `sign-manager-vX.Y.Z-mac.dmg`                                                                |
+| Ubuntu 24.04+ / Debian 13 | `sign-manager-vX.Y.Z-linux-ubuntu.deb` — `sudo apt install ./sign-manager-*.deb`             |
+| Fedora                    | `sign-manager-vX.Y.Z-linux-fedora.rpm` — `sudo dnf install ./sign-manager-*.rpm`             |
+| Arch Linux                | `sign-manager-vX.Y.Z-linux-arch.pkg.tar.zst` — `sudo pacman -U ./sign-manager-*.pkg.tar.zst` |
 
 Verify downloads against `SHA256SUMS.txt` in the release.
 
@@ -147,23 +145,23 @@ Press **Save** in the toolbar or use `Ctrl+S`. The Save button shows a yellow do
 
 ### Keyboard shortcuts
 
-| Shortcut | Action |
-|---|---|
-| Left / Right arrow | Step one frame backward / forward |
-| Space | Play / pause |
-| Ctrl + Left / Right | Previous / next label group |
-| Ctrl + Shift + Left / Right | Previous / next file (folder mode) |
-| Ctrl + S | Save the ASS file |
-| Ctrl + Z | Undo |
-| Ctrl + Shift + Z / Ctrl + Y | Redo |
-| Ctrl + D | Duplicate selected label |
-| Ctrl + B / Ctrl + I | Toggle bold / italic on selected label |
-| Ctrl + Shift + V | Paste style |
-| Delete | Delete selected labels |
-| I / O | Mark In / Mark Out (set selected label start / end to current frame) |
-| Shift + Left / Right | Shift selected labels by −1 / +1 frame (preserves duration) |
-| G | Toggle gallery |
-| L | Toggle labels list (right sidebar) |
+| Shortcut                    | Action                                                               |
+| --------------------------- | -------------------------------------------------------------------- |
+| Left / Right arrow          | Step one frame backward / forward                                    |
+| Space                       | Play / pause                                                         |
+| Ctrl + Left / Right         | Previous / next label group                                          |
+| Ctrl + Shift + Left / Right | Previous / next file (folder mode)                                   |
+| Ctrl + S                    | Save the ASS file                                                    |
+| Ctrl + Z                    | Undo                                                                 |
+| Ctrl + Shift + Z / Ctrl + Y | Redo                                                                 |
+| Ctrl + D                    | Duplicate selected label                                             |
+| Ctrl + B / Ctrl + I         | Toggle bold / italic on selected label                               |
+| Ctrl + Shift + V            | Paste style                                                          |
+| Delete                      | Delete selected labels                                               |
+| I / O                       | Mark In / Mark Out (set selected label start / end to current frame) |
+| Shift + Left / Right        | Shift selected labels by −1 / +1 frame (preserves duration)          |
+| G                           | Toggle gallery                                                       |
+| L                           | Toggle labels list (right sidebar)                                   |
 
 ## How it works
 
