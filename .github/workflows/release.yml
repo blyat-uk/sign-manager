@@ -24,7 +24,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: v
         name: Tag matches src/sign_manager/version.py
         shell: bash
@@ -63,9 +63,9 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       SIGN_MANAGER_DATA_DIR: ${{ github.workspace }}/.smoke-data
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -144,7 +144,7 @@ jobs:
           done
           true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sign-manager-${{ matrix.os_name }}
           path: out/sign-manager-v*
@@ -175,9 +175,9 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -209,7 +209,7 @@ jobs:
           '
           cat smoke/self-test.json
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sign-manager-linux-${{ matrix.distro }}
           path: out/sign-manager-v*
@@ -226,11 +226,11 @@ jobs:
     steps:
       # Full history and tags: the changelog is every commit since the
       # previous tag.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -274,7 +274,7 @@ jobs:
           EOF
           cat notes.md
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           name: Sign Manager ${{ github.ref_name }}
           body_path: notes.md
